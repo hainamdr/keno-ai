@@ -1,0 +1,2592 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Keno AI - Phân tích & Tự chơi</title>
+<meta name="description" content="Phân tích Keno Vietlott với AI tự học">
+<meta name="theme-color" content="#0a0e1a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="KenoAI">
+<link rel="manifest" href="manifest.json">
+<script>
+// ── Đăng ký Service Worker từ Blob (1 file duy nhất, không cần file riêng) ──
+if ('serviceWorker' in navigator) {
+  // Nội dung SW sẽ được nhúng inline bên dưới
+  window.__swReady = false;
+  window.__registerSW = function(swCode) {
+    const blob = new Blob([swCode], {type:'application/javascript'});
+    const url  = URL.createObjectURL(blob);
+    navigator.serviceWorker.register(url, {scope: location.pathname.replace(/\/[^\/]*$/, '/') || '/'})
+      .then(reg => {
+        window.__swReg = reg;
+        window.__swReady = true;
+        console.log('[KenoAI] SW đã đăng ký');
+        // Kích hoạt periodic sync nếu có
+        if ('periodicSync' in reg) {
+          reg.periodicSync.register('keno-periodic', {minInterval: 10*60*1000})
+            .catch(() => {}); // ignore nếu không có permission
+        }
+        // Lắng nghe tin nhắn từ SW
+        navigator.serviceWorker.addEventListener('message', e => {
+          if (e.data?.type === 'BG_UPDATE') window.__onBgUpdate?.(e.data.status);
+        });
+      })
+      .catch(e => console.warn('[KenoAI] SW lỗi:', e.message));
+  };
+}
+</script>
+<style>
+  :root {
+    --bg: #0a0e1a;
+    --surface: #111827;
+    --surface2: #1a2235;
+    --border: #1e2d45;
+    --accent: #e8b020;
+    --accent2: #3b82f6;
+    --green: #22c55e;
+    --red: #ef4444;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --hot: #f97316;
+    --cold: #38bdf8;
+    --radius: 10px;
+    --font: 'Segoe UI', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; }
+
+  /* Header */
+  .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 16px; display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 50; }
+  .logo { font-size: 20px; font-weight: 800; letter-spacing: -0.5px; }
+  .logo span { color: var(--accent); }
+  .live-badge { background: var(--red); color: #fff; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 20px; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  .header-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .balance-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 4px 12px; font-size: 13px; font-weight: 600; color: var(--accent); }
+
+  /* Nav */
+  .nav { display: flex; overflow-x: auto; gap: 4px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); scrollbar-width: none; }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav-btn { flex-shrink: 0; padding: 6px 14px; border-radius: 20px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 13px; font-weight: 500; cursor: pointer; transition: all .2s; }
+  .nav-btn.active { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 700; }
+
+  /* Tabs content */
+  .tab-content { display: none; padding: 16px; }
+  .tab-content.active { display: block; }
+
+  /* Cards */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 12px; }
+  .card-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 10px; }
+
+  /* Keno ball grid */
+  .ball-grid { display: grid; grid-template-columns: repeat(10, 1fr); gap: 5px; }
+  .ball { width: 100%; aspect-ratio: 1; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; background: var(--surface2); border: 1px solid var(--border); color: var(--muted); transition: all .3s; cursor: pointer; user-select: none; }
+  .ball.drawn { background: var(--accent); color: #000; border-color: var(--accent); transform: scale(1.05); }
+  .ball.hot { background: linear-gradient(135deg, #f97316, #dc2626); color: #fff; border-color: #f97316; }
+  .ball.cold { background: linear-gradient(135deg, #38bdf8, #1d4ed8); color: #fff; border-color: #38bdf8; }
+  .ball.selected { background: var(--accent2); color: #fff; border-color: var(--accent2); transform: scale(1.08); }
+  .ball.won { background: var(--green); color: #fff; border-color: var(--green); }
+  .ball.lost { background: var(--surface2); color: var(--muted); border-color: var(--border); opacity: 0.5; }
+
+  /* Draw result */
+  .draw-numbers { display: flex; flex-wrap: wrap; gap: 5px; }
+  .draw-num { width: 32px; height: 32px; border-radius: 50%; background: var(--accent); color: #000; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; }
+  .draw-info { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+
+  /* Stats bars */
+  .stat-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .stat-num { width: 26px; text-align: center; font-size: 12px; font-weight: 700; }
+  .stat-bar-wrap { flex: 1; height: 8px; background: var(--surface2); border-radius: 4px; overflow: hidden; }
+  .stat-bar { height: 100%; border-radius: 4px; transition: width .5s; }
+  .stat-count { font-size: 11px; color: var(--muted); width: 28px; text-align: right; }
+
+  /* Prediction */
+  .pred-numbers { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .pred-num { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 800; border: 2px solid; }
+  .pred-hot { background: rgba(249,115,22,0.2); border-color: #f97316; color: #f97316; }
+  .pred-cold { background: rgba(56,189,248,0.2); border-color: #38bdf8; color: #38bdf8; }
+  .pred-ai { background: rgba(168,85,247,0.2); border-color: #a855f7; color: #a855f7; }
+
+  /* Auto play */
+  .ap-config { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .ap-config label { font-size: 11px; color: var(--muted); margin-bottom: 4px; display: block; }
+  .ap-config input, .ap-config select, input[type=number], select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 7px; font-size: 13px; width: 100%; outline: none; }
+  .ap-config input:focus, .ap-config select:focus, input[type=number]:focus, select:focus { border-color: var(--accent2); }
+
+  .number-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0; }
+  .number-tag { background: var(--accent2); color: #fff; border-radius: 20px; padding: 3px 10px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .number-tag:hover::after { content: ' ×'; }
+
+  /* Buttons */
+  .btn { padding: 10px 18px; border-radius: 8px; border: none; font-size: 13px; font-weight: 700; cursor: pointer; transition: all .2s; display: inline-flex; align-items: center; gap: 6px; }
+  .btn-primary { background: var(--accent); color: #000; }
+  .btn-primary:hover { opacity: .85; }
+  .btn-blue { background: var(--accent2); color: #fff; }
+  .btn-blue:hover { opacity: .85; }
+  .btn-red { background: var(--red); color: #fff; }
+  .btn-red:hover { opacity: .85; }
+  .btn-green { background: var(--green); color: #fff; }
+  .btn-green:hover { opacity: .85; }
+  .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .btn-ghost:hover { border-color: var(--accent2); color: var(--accent2); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* History table */
+  .history-row { display: grid; grid-template-columns: 70px auto 60px; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .history-row:last-child { border: none; }
+  .h-kq { display: flex; flex-wrap: wrap; gap: 3px; }
+  .h-num { width: 22px; height: 22px; border-radius: 50%; background: var(--surface2); color: var(--muted); display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; }
+  .h-num.match { background: var(--green); color: #fff; }
+
+  /* Auto play log */
+  .ap-log { max-height: 280px; overflow-y: auto; }
+  .ap-log-row { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .ap-log-row:last-child { border: none; }
+  .ap-result { font-weight: 700; }
+  .ap-win { color: var(--green); }
+  .ap-lose { color: var(--red); }
+
+  /* Summary cards */
+  .summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+  .sum-card { background: var(--surface2); border-radius: 8px; padding: 10px 12px; }
+  .sum-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .sum-val { font-size: 18px; font-weight: 800; margin-top: 2px; }
+  .sum-val.pos { color: var(--green); }
+  .sum-val.neg { color: var(--red); }
+  .sum-val.neutral { color: var(--accent); }
+
+  /* Loading */
+  .loading { text-align: center; padding: 30px; color: var(--muted); }
+  .spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; margin: 0 auto 10px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Live timer */
+  .live-timer { font-size: 22px; font-weight: 800; color: var(--accent); text-align: center; margin: 10px 0; letter-spacing: 2px; }
+  .live-label { text-align: center; font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+
+  /* Progress */
+  .progress-wrap { background: var(--surface2); border-radius: 4px; height: 6px; margin-top: 8px; overflow: hidden; }
+  .progress-bar { height: 100%; background: var(--accent2); border-radius: 4px; transition: width .3s; }
+
+  /* Badge */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 700; }
+  .badge-hot { background: rgba(249,115,22,.2); color: #f97316; }
+  .badge-cold { background: rgba(56,189,248,.2); color: #38bdf8; }
+  .badge-win { background: rgba(34,197,94,.2); color: var(--green); }
+  .badge-lose { background: rgba(239,68,68,.2); color: var(--red); }
+
+  /* Divider */
+  .divider { height: 1px; background: var(--border); margin: 12px 0; }
+
+  /* Text utils */
+  .text-sm { font-size: 12px; }
+  .text-muted { color: var(--muted); }
+  .text-green { color: var(--green); }
+  .text-red { color: var(--red); }
+  .text-accent { color: var(--accent); }
+  .fw-bold { font-weight: 700; }
+  .mt-8 { margin-top: 8px; }
+  .mb-8 { margin-bottom: 8px; }
+
+  /* Number input row */
+  .num-input-wrap { display: flex; gap: 6px; margin-bottom: 8px; }
+  .num-input-wrap input { flex: 1; }
+
+  /* Live recent draws */
+  .live-draw-item { border-bottom: 1px solid var(--border); padding: 10px 0; }
+  .live-draw-item:last-child { border: none; }
+  .live-draw-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .live-draw-period { font-size: 13px; font-weight: 700; color: var(--accent2); }
+  .live-draw-time { font-size: 11px; color: var(--muted); }
+  .live-draw-nums { display: flex; flex-wrap: wrap; gap: 4px; }
+  .live-draw-ball { width: 28px; height: 28px; border-radius: 50%; background: var(--surface2); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: var(--muted); flex-shrink: 0; }
+  .live-draw-ball.hi { background: var(--accent); color: #000; border-color: var(--accent); }
+  .live-draw-load-more { text-align: center; padding: 8px; }
+
+  /* Live status banner */
+  .live-banner { display:none; align-items:center; gap:8px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:10px 14px; margin-bottom:12px; font-size:13px; }
+  .live-banner .live-badge { animation:pulse 1.5s infinite; }
+  .off-banner { background:rgba(100,116,139,.08); border-color:var(--muted); color:var(--muted); }
+
+  /* Scrollable history */
+  .history-wrap { max-height: 350px; overflow-y: auto; }
+  .history-wrap::-webkit-scrollbar { width: 4px; }
+  .history-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* Mobile padding bottom */
+  .bottom-pad { height: 20px; }
+
+  /* AI analysis box */
+  .ai-box { background: linear-gradient(135deg, rgba(168,85,247,.1), rgba(59,130,246,.1)); border: 1px solid rgba(168,85,247,.3); border-radius: var(--radius); padding: 14px; margin-top: 10px; }
+  .ai-box p { font-size: 13px; line-height: 1.6; color: var(--text); }
+  .ai-thinking { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; }
+  .ai-thinking span { animation: blink 1s infinite; }
+  .ai-thinking span:nth-child(2) { animation-delay: .3s; }
+  .ai-thinking span:nth-child(3) { animation-delay: .6s; }
+  @keyframes blink { 0%,100%{opacity:.2} 50%{opacity:1} }
+
+  /* Range input */
+  .range-wrap { display: flex; gap: 10px; align-items: center; }
+  .range-wrap input[type=range] { flex: 1; accent-color: var(--accent2); }
+  .range-val { min-width: 32px; text-align: center; font-weight: 700; color: var(--accent); font-size: 13px; }
+
+  /* Learning engine */
+  .learn-ring { display:flex; align-items:center; justify-content:center; width:80px; height:80px; border-radius:50%; border:4px solid var(--border); position:relative; flex-shrink:0; }
+  .learn-ring svg { position:absolute; top:0; left:0; transform:rotate(-90deg); }
+  .learn-ring-val { font-size:18px; font-weight:800; color:var(--accent); }
+  .learn-stat-row { display:flex; justify-content:space-between; align-items:center; padding:7px 0; border-bottom:1px solid var(--border); font-size:13px; }
+  .learn-stat-row:last-child { border:none; }
+  .weight-bar-wrap { flex:1; height:6px; background:var(--surface2); border-radius:3px; margin:0 8px; overflow:hidden; }
+  .weight-bar { height:100%; border-radius:3px; background:var(--accent2); transition:width .4s; }
+  .gen-badge { display:inline-block; padding:2px 8px; border-radius:20px; font-size:10px; font-weight:700; background:rgba(168,85,247,.2); color:#a855f7; }
+  .improve-arrow { font-size:11px; }
+  .improve-up { color:var(--green); }
+  .improve-dn { color:var(--red); }
+  .improve-eq { color:var(--muted); }
+
+  /* Toast */
+  /* Background status badge */
+  .bg-status-bar { display:none; align-items:center; gap:8px; padding:6px 12px; background:rgba(59,130,246,.1); border-bottom:1px solid rgba(59,130,246,.2); font-size:11px; color:var(--muted); position:sticky; top:57px; z-index:40; }
+  .bg-dot { width:6px; height:6px; border-radius:50%; background:var(--muted); flex-shrink:0; }
+  .bg-dot.active { background:var(--green); animation:pulse 2s infinite; }
+
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--surface); border: 1px solid var(--border); padding: 10px 20px; border-radius: 20px; font-size: 13px; font-weight: 600; z-index: 999; display: none; box-shadow: 0 4px 20px rgba(0,0,0,.4); }
+
+  /* Tabs */
+  .tab-sub { display: flex; gap: 6px; margin-bottom: 12px; }
+  .tab-sub-btn { padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; }
+  .tab-sub-btn.active { background: var(--surface2); color: var(--text); border-color: var(--accent2); }
+
+  /* Collapsible */
+  details summary { cursor: pointer; padding: 8px 0; font-size: 13px; color: var(--accent2); user-select: none; }
+  details summary::-webkit-details-marker { display: none; }
+
+  /* Bậc table */
+  .bac-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+  .bac-table th { text-align: left; padding: 6px 8px; background: var(--surface2); color: var(--muted); font-size: 11px; text-transform: uppercase; }
+  .bac-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .bac-table tr:last-child td { border: none; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">Keno<span>AI</span></div>
+  <span class="live-badge">LIVE</span>
+  <div class="header-right">
+    <div class="balance-chip" id="balanceChip">💰 1,000,000</div>
+  </div>
+</div>
+
+<div class="bg-status-bar" id="bgStatusBar">
+  <div class="bg-dot" id="bgDot"></div>
+  <span id="bgStatusText">Background: chưa khởi động</span>
+  <span style="margin-left:auto;cursor:pointer" onclick="forceBgRun()">▶ Chạy ngay</span>
+</div>
+
+<div class="nav">
+  <button class="nav-btn active" onclick="switchTab('live')">🔴 Trực tiếp</button>
+  <button class="nav-btn" onclick="switchTab('stats')">📊 Thống kê</button>
+  <button class="nav-btn" onclick="switchTab('predict')">🤖 Dự đoán AI</button>
+  <button class="nav-btn" onclick="switchTab('autoplay')">⚡ Tự chơi</button>
+  <button class="nav-btn" onclick="switchTab('history')">📋 Lịch sử</button>
+  <button class="nav-btn" onclick="switchTab('learn')">🧠 Tự học</button>
+</div>
+
+<!-- ===== TAB: LIVE ===== -->
+<div class="tab-content active" id="tab-live">
+  <div class="live-banner" id="liveStatusBanner"></div>
+
+  <div class="card">
+    <div class="draw-info">
+      <span id="drawPeriod">Đang tải...</span>
+      <span id="drawTime" style="color:var(--accent)">--:--</span>
+    </div>
+    <div class="live-label">Đếm ngược kỳ tiếp theo</div>
+    <div class="live-timer" id="countdown">--:--</div>
+    <div class="progress-wrap"><div class="progress-bar" id="progressBar" style="width:0%"></div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Kết quả kỳ mới nhất</div>
+    <div id="latestDraw" class="loading"><div class="spinner"></div>Đang lấy kết quả...</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Bảng số 1–80</div>
+    <div class="ball-grid" id="mainGrid"></div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div class="card-title" style="margin:0">📋 Các kỳ gần đây</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <span style="font-size:11px;color:var(--muted)">Highlight:</span>
+        <input type="number" id="liveHighlight" min="1" max="80" placeholder="Số..." style="width:56px;padding:3px 6px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text)" oninput="renderLiveHistory()">
+      </div>
+    </div>
+    <div id="liveHistoryList"></div>
+    <div class="live-draw-load-more">
+      <button class="btn btn-ghost" id="liveLoadMoreBtn" onclick="loadMoreLiveHistory()" style="font-size:12px;padding:6px 14px">Xem thêm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== TAB: STATS ===== -->
+<div class="tab-content" id="tab-stats">
+  <div class="card">
+    <div class="card-title">Tần suất xuất hiện (50 kỳ gần nhất)</div>
+    <div class="tab-sub">
+      <button class="tab-sub-btn active" onclick="showStatsView('bar')">Biểu đồ</button>
+      <button class="tab-sub-btn" onclick="showStatsView('grid')">Lưới số</button>
+    </div>
+    <div id="statsBar">
+      <div id="freqBars" class="loading"><div class="spinner"></div>Đang tính...</div>
+    </div>
+    <div id="statsGrid" style="display:none">
+      <div class="ball-grid" id="statsGridBalls"></div>
+      <div class="mt-8" style="display:flex;gap:12px;font-size:12px">
+        <span><span style="color:var(--hot)">●</span> Số nóng (nhiều nhất)</span>
+        <span><span style="color:var(--cold)">●</span> Số lạnh (ít nhất)</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Top 10 số nóng / lạnh</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div>
+        <div class="text-sm fw-bold mb-8" style="color:var(--hot)">🔥 Số nóng</div>
+        <div id="hotNumbers" class="pred-numbers"></div>
+      </div>
+      <div>
+        <div class="text-sm fw-bold mb-8" style="color:var(--cold)">❄️ Số lạnh</div>
+        <div id="coldNumbers" class="pred-numbers"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Phân bố Chẵn / Lẻ / Thấp / Cao</div>
+    <div id="distStats" class="loading"><div class="spinner"></div></div>
+  </div>
+</div>
+
+<!-- ===== TAB: PREDICT ===== -->
+<div class="tab-content" id="tab-predict">
+  <div class="card">
+    <div class="card-title">Dự đoán thống kê</div>
+    <div class="text-sm text-muted mb-8">Kết hợp tần suất + chu kỳ + phân bố để gợi ý</div>
+    <div id="statPredNumbers" class="pred-numbers"></div>
+    <div class="divider"></div>
+    <div style="font-size:12px;color:var(--muted)">
+      <span class="badge badge-hot">🔥 Nóng</span> &nbsp;
+      <span class="badge badge-cold">❄️ Lạnh</span> &nbsp;
+      <span style="background:rgba(168,85,247,.2);color:#a855f7;border-radius:20px;padding:2px 8px;font-size:10px;font-weight:700">🤖 AI</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🤖 Phân tích AI (Offline)</div>
+    <div class="btn-row mb-8">
+      <button class="btn btn-blue" onclick="runAIAnalysis()" id="aiBtn">Phân tích với AI</button>
+      <button class="btn btn-ghost" onclick="runAIAnalysis(true)" id="aiRefreshBtn">🔄 Làm mới</button>
+    </div>
+    <div id="aiOutput">
+      <div class="text-sm text-muted">AI chạy hoàn toàn offline — không cần internet. Nhấn để phân tích.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Bộ số AI đề xuất</div>
+    <div id="aiNumbers" class="pred-numbers">
+      <div class="text-sm text-muted">Chạy phân tích AI trước.</div>
+    </div>
+    <div class="divider"></div>
+    <button class="btn btn-green mt-8" onclick="importAIToAutoplay()">⚡ Dùng số này để Tự chơi</button>
+  </div>
+</div>
+
+<!-- ===== TAB: AUTOPLAY ===== -->
+<div class="tab-content" id="tab-autoplay">
+  <div class="summary-grid">
+    <div class="sum-card">
+      <div class="sum-label">Số dư</div>
+      <div class="sum-val neutral" id="apBalance">1,000,000</div>
+    </div>
+    <div class="sum-card">
+      <div class="sum-label">Lãi/Lỗ</div>
+      <div class="sum-val" id="apPnL">0</div>
+    </div>
+    <div class="sum-card">
+      <div class="sum-label">Tổng kỳ đã chơi</div>
+      <div class="sum-val neutral" id="apRounds">0</div>
+    </div>
+    <div class="sum-card">
+      <div class="sum-label">Tỷ lệ thắng</div>
+      <div class="sum-val neutral" id="apWinRate">–</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Cấu hình tự chơi</div>
+
+    <div class="ap-config">
+      <div>
+        <label>Số tiền mỗi lần (VND)</label>
+        <input type="number" id="betAmount" value="10000" min="10000" step="10000">
+      </div>
+      <div>
+        <label>Chế độ chơi</label>
+        <select id="playMode">
+          <option value="bac">Theo bậc</option>
+          <option value="bao">Theo bao</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Chế độ theo bậc -->
+    <div id="modeBac">
+      <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:6px">Chọn bậc (1–10)</label>
+      <select id="bacLevel" onchange="updateBacInfo()">
+        <option value="1">Bậc 1 (chọn 1 số)</option>
+        <option value="2">Bậc 2 (chọn 2 số)</option>
+        <option value="3" selected>Bậc 3 (chọn 3 số)</option>
+        <option value="4">Bậc 4 (chọn 4 số)</option>
+        <option value="5">Bậc 5 (chọn 5 số)</option>
+        <option value="6">Bậc 6 (chọn 6 số)</option>
+        <option value="7">Bậc 7 (chọn 7 số)</option>
+        <option value="8">Bậc 8 (chọn 8 số)</option>
+        <option value="9">Bậc 9 (chọn 9 số)</option>
+        <option value="10">Bậc 10 (chọn 10 số)</option>
+      </select>
+      <div id="bacInfo" class="text-sm text-muted mt-8"></div>
+    </div>
+
+    <!-- Chế độ theo bao -->
+    <div id="modeBao" style="display:none">
+      <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:6px">Loại bao</label>
+      <select id="baoType" onchange="updateBaoInfo()">
+        <option value="2">Bao 2 — chọn ≥2, thưởng 90K/tổ hợp trúng</option>
+        <option value="3">Bao 3 — chọn ≥3, thưởng 200K/tổ hợp trúng</option>
+        <option value="4">Bao 4 — chọn ≥4, thưởng 400K/tổ hợp trúng</option>
+        <option value="5">Bao 5 — chọn ≥5, thưởng 4.4tr/tổ hợp trúng</option>
+        <option value="6">Bao 6 — chọn ≥6, thưởng 12.5tr/tổ hợp trúng</option>
+        <option value="7">Bao 7 — chọn ≥7, thưởng 1.2tr/tổ hợp trúng</option>
+        <option value="8">Bao 8 — chọn ≥8, thưởng 200tr/tổ hợp trúng</option>
+        <option value="9">Bao 9 — chọn ≥9, thưởng 800tr/tổ hợp trúng</option>
+        <option value="10">Bao 10 — chọn ≥10, thưởng 2 tỷ/tổ hợp trúng</option>
+      </select>
+      <div id="baoInfo" class="text-sm text-muted mt-8"></div>
+    </div>
+
+    <div class="divider"></div>
+
+    <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:6px">Dãy số của bạn</label>
+    <div class="num-input-wrap">
+      <input type="number" id="numInput" placeholder="Nhập số 1–80" min="1" max="80">
+      <button class="btn btn-ghost" onclick="addNumber()">+ Thêm</button>
+      <button class="btn btn-ghost" onclick="clearNumbers()">Xóa</button>
+    </div>
+    <div id="selectedNumbers" class="number-tags"></div>
+
+    <!-- Quick pick from ball grid -->
+    <details class="mt-8">
+      <summary>▶ Chọn số từ bảng 1–80</summary>
+      <div class="ball-grid mt-8" id="apGrid" style="margin-top:8px"></div>
+    </details>
+
+    <div class="divider"></div>
+
+    <div class="ap-config">
+      <div>
+        <label>Số kỳ tự chơi</label>
+        <input type="number" id="apRoundsInput" value="20" min="1" max="200">
+      </div>
+      <div>
+        <label>Tốc độ (giây/kỳ)</label>
+        <div class="range-wrap">
+          <input type="range" min="1" max="10" value="3" id="apSpeed" oninput="document.getElementById('apSpeedVal').textContent=this.value">
+          <div class="range-val" id="apSpeedVal">3</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-bottom:12px">
+      <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:6px">Bắt đầu từ kỳ</label>
+      <div style="display:flex;gap:8px">
+        <label style="flex:1;display:flex;align-items:center;gap:8px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:9px 12px;cursor:pointer;font-size:13px" id="lbl-current">
+          <input type="radio" name="startFrom" id="startFromCurrent" value="current" checked onchange="updateStartFromUI()">
+          <span>⏱ Kỳ hiện tại</span>
+          <span style="font-size:11px;color:var(--muted);margin-left:auto" id="currentKyLabel"></span>
+        </label>
+        <label style="flex:1;display:flex;align-items:center;gap:8px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:9px 12px;cursor:pointer;font-size:13px" id="lbl-first">
+          <input type="radio" name="startFrom" id="startFromFirst" value="first" onchange="updateStartFromUI()">
+          <span>⏮ Kỳ đầu tiên</span>
+          <span style="font-size:11px;color:var(--muted);margin-left:auto" id="firstKyLabel"></span>
+        </label>
+      </div>
+      <div id="startFromInfo" style="margin-top:6px;font-size:11px;color:var(--muted)"></div>
+    </div>
+
+    <div class="btn-row mt-8">
+      <button class="btn btn-primary" id="startBtn" onclick="startAutoPlay()">▶ Bắt đầu tự chơi</button>
+      <button class="btn btn-red" id="stopBtn" onclick="stopAutoPlay()" disabled>⏹ Dừng</button>
+      <button class="btn btn-ghost" onclick="resetAutoPlay()">↺ Reset</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Kết quả đang chạy</div>
+    <div id="currentRound" style="display:none">
+      <div class="draw-info">
+        <span id="apRoundLabel">Kỳ 1</span>
+        <span id="apRoundResult" class="fw-bold"></span>
+      </div>
+      <div id="apCurrentDraw" class="draw-numbers" style="margin-bottom:10px"></div>
+      <div class="text-sm text-muted">Số bạn chọn:</div>
+      <div id="apYourNumbers" class="draw-numbers mt-8"></div>
+    </div>
+    <div id="noRound" class="text-sm text-muted">Chưa bắt đầu.</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Nhật ký tự chơi</div>
+    <div class="ap-log" id="apLog"><div class="text-sm text-muted">Chưa có dữ liệu.</div></div>
+  </div>
+</div>
+
+<!-- ===== TAB: LEARN ===== -->
+<div class="tab-content" id="tab-learn">
+
+  <!-- Cấu hình học -->
+  <div class="card">
+    <div class="card-title">🧠 Cấu hình tự học</div>
+    <div class="ap-config">
+      <div>
+        <label>Mục tiêu số trùng</label>
+        <select id="learnTarget">
+          <option value="5">5 số trùng</option>
+          <option value="6">6 số trùng</option>
+          <option value="7">7 số trùng</option>
+          <option value="8">8 số trùng</option>
+          <option value="9">9 số trùng</option>
+          <option value="10" selected>10 số trùng</option>
+        </select>
+      </div>
+      <div>
+        <label>Số lượng dự đoán</label>
+        <select id="learnPickCount">
+          <option value="5">Chọn 5 số</option>
+          <option value="7">Chọn 7 số</option>
+          <option value="10" selected>Chọn 10 số</option>
+          <option value="12">Chọn 12 số</option>
+          <option value="15">Chọn 15 số</option>
+        </select>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:6px" id="learnDataInfo">
+      Dữ liệu học: tất cả kỳ hôm nay (từ kỳ đầu đến kỳ hiện tại)
+    </div>
+    <div id="learnSavedBadge" style="display:none;flex-direction:column;gap:2px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px"></div>
+    <div class="ap-config" style="margin-top:4px">
+      <div>
+        <label>Điều kiện tự dừng</label>
+        <select id="learnStopMode">
+          <option value="target">Khi đạt mục tiêu (3 lần)</option>
+          <option value="gens_100k">Sau 100,000 thế hệ</option>
+          <option value="gens_500k">Sau 500,000 thế hệ</option>
+          <option value="gens_1m">Sau 1,000,000 thế hệ</option>
+          <option value="never">Không tự dừng</option>
+        </select>
+      </div>
+      <div>
+        <label>Tốc độ cập nhật UI</label>
+        <select id="learnUIRate">
+          <option value="200">Nhanh (200ms)</option>
+          <option value="500" selected>Cân bằng (500ms)</option>
+          <option value="1000">Chậm / tiết kiệm pin</option>
+        </select>
+      </div>
+    </div>
+    <div class="progress-wrap" style="margin-bottom:10px">
+      <div class="progress-bar" id="learnProgressBar" style="width:0%;background:var(--accent2)"></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="learnStartBtn" onclick="startLearning()">▶ Bắt đầu học</button>
+      <button class="btn btn-red"     id="learnStopBtn"  onclick="stopLearning()" disabled>⏹ Dừng</button>
+      <button class="btn btn-ghost"                      onclick="resetLearning()">↺ Reset</button>
+    </div>
+  </div>
+
+  <!-- Tiến trình -->
+  <div class="card">
+    <div style="display:flex;gap:14px;align-items:center;margin-bottom:10px">
+      <div class="learn-ring">
+        <svg width="80" height="80" viewBox="0 0 80 80">
+          <circle cx="40" cy="40" r="34" fill="none" stroke="var(--border)" stroke-width="6"/>
+          <circle id="learnArc" cx="40" cy="40" r="34" fill="none" stroke="var(--accent)" stroke-width="6"
+            stroke-dasharray="213.6" stroke-dashoffset="213.6" stroke-linecap="round"/>
+        </svg>
+        <div class="learn-ring-val" id="learnBestVal">0</div>
+      </div>
+      <div style="flex:1">
+        <div style="font-size:11px;color:var(--muted)">Kỷ lục trùng / Mục tiêu</div>
+        <div style="font-size:22px;font-weight:800;color:var(--accent)" id="learnBestText">–</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px" id="learnGenText">Thế hệ 0 · Chưa học</div>
+      </div>
+    </div>
+    <div class="summary-grid" style="margin-bottom:0">
+      <div class="sum-card"><div class="sum-label">Thế hệ</div><div class="sum-val neutral" id="learnGen">0</div></div>
+      <div class="sum-card"><div class="sum-label">Trùng TB</div><div class="sum-val neutral" id="learnAvg">–</div></div>
+      <div class="sum-card"><div class="sum-label">Đạt mục tiêu</div><div class="sum-val pos" id="learnHits">0</div></div>
+      <div class="sum-card"><div class="sum-label">Kỳ học hôm nay</div><div class="sum-val neutral" id="learnTodayCount">0</div></div>
+    </div>
+  </div>
+
+  <!-- Gợi ý kỳ tiếp theo -->
+  <div class="card">
+    <div class="card-title">🎯 Gợi ý cho kỳ tiếp theo</div>
+    <div class="text-sm text-muted mb-8" id="learnNextInfo">Học xong để xem gợi ý so với kỳ hiện tại.</div>
+    <div id="learnNextNumbers" class="pred-numbers" style="margin-bottom:10px"></div>
+    <!-- So sánh với kỳ hiện tại -->
+    <div id="learnCompare" style="display:none">
+      <div class="divider"></div>
+      <div class="card-title" style="margin-top:8px">So sánh với kỳ mới nhất (#<span id="cmpPeriod">–</span>)</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Số kỳ thực tế:</div>
+      <div id="cmpActual" class="draw-numbers" style="margin-bottom:8px"></div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Số trùng: <strong id="cmpHits" style="color:var(--green)">–</strong></div>
+    </div>
+    <div class="btn-row mt-8">
+      <button class="btn btn-green" onclick="applyLearnedNumbers()">⚡ Dùng số này để Tự chơi</button>
+      <button class="btn btn-blue"  onclick="compareWithLatest()">🔍 So sánh kỳ hiện tại</button>
+    </div>
+  </div>
+
+  <!-- Trọng số & nhật ký -->
+  <div class="card">
+    <div class="card-title">Trọng số (top 15 số ưu tiên)</div>
+    <div id="weightBars" class="text-sm text-muted">Chưa học vòng nào.</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Nhật ký học (kỳ hôm nay)</div>
+    <div id="learnLog" style="max-height:220px;overflow-y:auto">
+      <div class="text-sm text-muted">Chưa có dữ liệu.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Biểu đồ tiến bộ</div>
+    <canvas id="learnChart" height="120" style="width:100%"></canvas>
+  </div>
+</div>
+
+<!-- ===== TAB: HISTORY ===== -->
+<div class="tab-content" id="tab-history">
+  <div class="card">
+    <div class="card-title">50 kỳ quay gần nhất</div>
+    <div class="history-wrap" id="historyList"><div class="loading"><div class="spinner"></div>Đang tải...</div></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="bottom-pad"></div>
+
+<script>
+// =====================================================================
+// DATA & STATE
+// =====================================================================
+let drawData = [];        // [{period, date, numbers:[]}]
+let freq = {};            // {num: count}
+let autoPlaying = false;
+let autoPlayTimer = null;
+let apSession = {
+  balance: 1_000_000,
+  startBalance: 1_000_000,
+  rounds: 0,
+  wins: 0,
+  log: []
+};
+let selectedNums = [];    // user's chosen numbers
+let aiSuggestedNums = [];
+let countdownTimer = null;
+
+// ── Bảng giải thưởng Keno chính thức Vietlott (mệnh giá 10.000đ) ──
+// Theo bậc: chọn N số, trùng đủ N số mới thắng (trừ bậc 1,2)
+// Giá trị giải = số tiền thực (VND) / 10.000 * bet
+const BAC_PRIZE = {
+  1:  { picks:1,  tiers:[{ match:1,  prize:20000   }] },
+  2:  { picks:2,  tiers:[{ match:2,  prize:90000   }] },
+  3:  { picks:3,  tiers:[{ match:2,  prize:20000   }, { match:3,  prize:200000   }] },
+  4:  { picks:4,  tiers:[{ match:2,  prize:10000   }, { match:3,  prize:50000    }, { match:4,  prize:400000   }] },
+  5:  { picks:5,  tiers:[{ match:3,  prize:10000   }, { match:4,  prize:150000   }, { match:5,  prize:4400000  }] },
+  6:  { picks:6,  tiers:[{ match:3,  prize:10000   }, { match:4,  prize:40000    }, { match:5,  prize:450000   }, { match:6,  prize:12500000 }] },
+  7:  { picks:7,  tiers:[{ match:3,  prize:10000   }, { match:4,  prize:20000    }, { match:5,  prize:100000   }, { match:6,  prize:1200000  }] },
+  8:  { picks:8,  tiers:[{ match:0,  prize:10000   }, { match:4,  prize:10000    }, { match:5,  prize:50000    }, { match:6,  prize:500000   }, { match:7,  prize:5000000  }, { match:8,  prize:200000000 }] },
+  9:  { picks:9,  tiers:[{ match:0,  prize:10000   }, { match:4,  prize:10000    }, { match:5,  prize:30000    }, { match:6,  prize:150000   }, { match:7,  prize:1500000  }, { match:8,  prize:12000000 }, { match:9,  prize:800000000 }] },
+  10: { picks:10, tiers:[{ match:0,  prize:10000   }, { match:5,  prize:20000    }, { match:6,  prize:80000    }, { match:7,  prize:710000   }, { match:8,  prize:8000000  }, { match:9,  prize:150000000}, { match:10, prize:2000000000}] },
+};
+
+// Tính tiền thắng theo bậc (trả về số tiền thực nhận, 0 nếu thua)
+function calcBacPrize(level, picks, matchCount, bet) {
+  const def = BAC_PRIZE[level];
+  if (!def) return 0;
+  const unit = 10000; // mệnh giá cơ sở
+  const multiplier = bet / unit;
+  // Tìm tier cao nhất phù hợp
+  let prize = 0;
+  for (const tier of def.tiers) {
+    if (tier.match === 0) {
+      // Trùng 0 số cũng thắng (bậc 8,9,10)
+      if (matchCount === 0) { prize = tier.prize * multiplier; break; }
+    } else if (matchCount >= tier.match) {
+      prize = tier.prize * multiplier;
+      // Không break — lấy tier cao nhất
+    }
+  }
+  return Math.round(prize);
+}
+
+// ── Bảng giải Bao (theo bao N số, cược 10.000đ) ──
+// Bao: chọn nhiều hơn N số, tự động tổ hợp thành các vé bậc N
+// Tiền cược nhân với số tổ hợp C(picks, N)
+// Đây là bảng prize cho MỖI TỔ HỢP thắng
+const BAO_BASE_PRIZE = {
+  // baoN: prize khi 1 tổ hợp thắng (đồng / 10.000đ cược)
+  2:  90000,
+  3:  200000,
+  4:  400000,
+  5:  4400000,
+  6:  12500000,
+  7:  1200000,
+  8:  200000000,
+  9:  800000000,
+  10: 2000000000,
+};
+
+function comb(n, k) {
+  if (k > n) return 0;
+  if (k === 0 || k === n) return 1;
+  let result = 1;
+  for (let i = 0; i < k; i++) { result = result * (n - i) / (i + 1); }
+  return Math.round(result);
+}
+
+function calcBaoPrize(baoN, picks, draw, selectedNums, bet) {
+  // Số tổ hợp = C(picks, baoN)
+  const totalCombs = comb(picks, baoN);
+  const costPerComb = 10000;
+  const totalCost = totalCombs * costPerComb;
+  // Thực tế người chơi bỏ bet, quy đổi số tổ hợp
+  const realCombs = Math.max(1, Math.round(bet / costPerComb));
+
+  // Đếm số tổ hợp thắng: mỗi tổ hợp baoN số, tất cả đều phải có trong draw
+  const matched = selectedNums.filter(n => draw.includes(n));
+  const winCombs = comb(matched.length, baoN);
+
+  const baseP = BAO_BASE_PRIZE[baoN] || 0;
+  const prize = winCombs * baseP * (bet / (totalCombs * costPerComb));
+  return { prize: Math.round(prize), winCombs, totalCombs, matched: matched.length };
+}
+
+// =====================================================================
+// INIT
+// =====================================================================
+window.onload = () => {
+  buildMainGrid();
+  buildAPGrid();
+  fetchData();
+  updateBacInfo();
+  document.getElementById('playMode').addEventListener('change', toggleMode);
+  updateStartFromUI();
+};
+
+// =====================================================================
+// BUILD GRIDS
+// =====================================================================
+function buildMainGrid() {
+  const g = document.getElementById('mainGrid');
+  g.innerHTML = '';
+  for (let i = 1; i <= 80; i++) {
+    const b = document.createElement('div');
+    b.className = 'ball';
+    b.textContent = i < 10 ? '0'+i : i;
+    b.id = 'ball'+i;
+    g.appendChild(b);
+  }
+}
+
+function buildAPGrid() {
+  const g = document.getElementById('apGrid');
+  g.innerHTML = '';
+  for (let i = 1; i <= 80; i++) {
+    const b = document.createElement('div');
+    b.className = 'ball';
+    b.textContent = i < 10 ? '0'+i : i;
+    b.onclick = () => toggleAPBall(i, b);
+    g.appendChild(b);
+  }
+}
+
+// =====================================================================
+// FETCH DATA — minhchinh.com trực tiếp (6:00–22:00) hoặc demo
+// =====================================================================
+
+const MINHCHINH_URL = 'https://www.minhchinh.com/truc-tiep-xo-so-tu-chon-keno.html';
+
+function isKenoHours() {
+  const now = new Date();
+  const vnH = (now.getUTCHours() + 7) % 24;
+  const vnM = now.getUTCMinutes();
+  const mins = vnH * 60 + vnM;
+  return mins >= 6 * 60 && mins < 22 * 60;
+}
+
+async function fetchData() {
+  const banner = document.getElementById('liveStatusBanner');
+  if (banner) {
+    banner.style.display = 'flex';
+    banner.innerHTML = `<span class="live-badge">LIVE</span><span>Đang tải từ minhchinh.com...</span>`;
+  }
+  await fetchFromMinhChinh(!isKenoHours());
+}
+
+async function fetchFromMinhChinh(offHours = false) {
+  const banner = document.getElementById('liveStatusBanner');
+  try {
+    const timeout = new Promise((_, r) => setTimeout(() => r(new Error('Timeout')), 12000));
+    const resp = await Promise.race([
+      fetch(MINHCHINH_URL, {
+        headers: {
+          'Accept': 'text/html',
+          'Cache-Control': 'no-cache'
+        }
+      }),
+      timeout
+    ]);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const html = await resp.text();
+    if (!html || html.length < 500) throw new Error('Nội dung rỗng');
+
+    const draws = parseMinhChinhHTML(html);
+    if (!draws.length) throw new Error('Không parse được kỳ nào');
+
+    drawData = draws;
+    computeFreq();
+    renderLatestDraw();
+    renderHistory();
+    renderStats();
+    renderStatPrediction();
+    startCountdown();
+
+    if (offHours) {
+      if (banner) banner.innerHTML = `<span>⏸ Ngoài giờ (22:00–6:00)</span><span style="margin-left:auto;font-size:11px;color:var(--muted)">${draws.length} kỳ hôm nay</span>`;
+      showToast(`📋 Ngoài giờ — đã tải ${draws.length} kỳ lịch sử`);
+    } else {
+      if (banner) banner.innerHTML = `<span class="live-badge">LIVE</span><span>minhchinh.com · ${draws.length} kỳ · tự cập nhật mỗi 60s</span>`;
+      showToast(`✅ ${draws.length} kỳ thật từ minhchinh.com`);
+      setTimeout(fetchData, 60000);
+    }
+
+  } catch (e) {
+    // minhchinh.com không cho CORS → fallback demo im lặng
+    if (banner) banner.style.display = 'none';
+    useDemoData();
+  }
+}
+
+function parseMinhChinhHTML(html) {
+  const draws = [];
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  // Lấy toàn bộ text, chuẩn hoá khoảng trắng
+  const raw = (doc.body?.innerText || doc.body?.textContent || html);
+  const text = raw.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ');
+
+  // Format minhchinh.com:
+  // #293118 HÒA CLNHỎ 13 23/08/2026 21:52   04 07 12 13 14 15 16 20 23 30 31 38 40 41 50 53 63 69 74 75
+  // Sau mỗi kỳ là 20 số trong khoảng 01–80, ngăn cách bởi khoảng trắng
+  const kyRegex = /#(\d{5,7})[^#]*(\d{2}\/\d{2}\/\d{4})\s*(\d{2}:\d{2})\s*((?:(?:[0-7]?\d|80)\s+){19}(?:[0-7]?\d|80))/g;
+  let m;
+  while ((m = kyRegex.exec(text)) !== null) {
+    const nums = m[4].trim().split(/\s+/).map(Number).filter(n => n >= 1 && n <= 80);
+    const unique = [...new Set(nums)].slice(0, 20);
+    if (unique.length === 20) {
+      draws.push({
+        period: +m[1],
+        date:   m[2],
+        time:   m[3],
+        numbers: unique.sort((a,b) => a-b)
+      });
+    }
+  }
+
+  // Fallback: tách riêng periods, dates, rồi tìm blocks 20 số
+  if (draws.length === 0) {
+    const periods = [...text.matchAll(/#(\d{5,7})/g)];
+    const dates   = [...text.matchAll(/(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2})/g)];
+
+    // Tìm tất cả block 20 số hợp lệ liên tiếp
+    const numBlocks = [];
+    const blockRe = /\b((?:(?:[0-7]\d|[1-9]|80)\b\s*){20})/g;
+    let bm;
+    while ((bm = blockRe.exec(text)) !== null) {
+      const ns = bm[1].trim().split(/\s+/).map(Number).filter(n => n >= 1 && n <= 80);
+      const u = [...new Set(ns)];
+      if (u.length === 20) numBlocks.push(u.sort((a,b)=>a-b));
+    }
+
+    periods.forEach((pm, i) => {
+      const d = dates[i];
+      const b = numBlocks[i];
+      if (d && b) {
+        draws.push({
+          period: +pm[1],
+          date:   d[1],
+          time:   d[2],
+          numbers: b
+        });
+      }
+    });
+  }
+
+  return draws.sort((a,b) => b.period - a.period);
+}
+
+// Tính kỳ hiện tại dựa theo giờ thực (Keno bắt đầu 6:00, mỗi 10 phút)
+function calcCurrentPeriod() {
+  const now = new Date();
+  const vnH = (now.getUTCHours() + 7) % 24;
+  const vnM = now.getUTCMinutes();
+  // Kỳ đầu ngày bắt đầu lúc 6:00
+  const minSince6 = Math.max(0, vnH * 60 + vnM - 6 * 60);
+  const kyToday = Math.floor(minSince6 / 10) + 1; // số kỳ đã chạy hôm nay
+  // Ngày gốc tham chiếu: 24/08/2026 = kỳ ~293000 (ước tính)
+  const BASE_DATE = new Date(Date.UTC(2026, 7, 24, 0, 0, 0)); // 24/08/2026 UTC
+  const BASE_PERIOD = 293118; // kỳ đầu ngày 24/08/2026
+  const daysDiff = Math.floor((now - BASE_DATE) / (1000 * 60 * 60 * 24));
+  // Mỗi ngày có tối đa 97 kỳ (6:00–21:50)
+  const PERIODS_PER_DAY = 97;
+  return BASE_PERIOD + daysDiff * PERIODS_PER_DAY + (kyToday - 1);
+}
+
+function genDraw(periodNum, timeOffset) {
+  const nums = [];
+  // Dùng seed từ period để kết quả nhất quán (cùng period = cùng số)
+  let seed = periodNum * 1000003 + timeOffset;
+  function rand() {
+    seed = (seed * 1664525 + 1013904223) & 0xffffffff;
+    return Math.abs(seed) / 0xffffffff;
+  }
+  while (nums.length < 20) {
+    const n = Math.floor(rand() * 80) + 1;
+    if (!nums.includes(n)) nums.push(n);
+  }
+  return nums.sort((a,b) => a-b);
+}
+
+function useDemoData() {
+  drawData = [];
+  const currentPeriod = calcCurrentPeriod();
+
+  for (let i = 0; i < 100; i++) {
+    const period = currentPeriod - i;
+    if (period < 1) break;
+    const d = new Date();
+    d.setMinutes(d.getMinutes() - i * 10);
+    // Tính giờ VN
+    const vnMs = d.getTime() + 7 * 3600 * 1000;
+    const vnD = new Date(vnMs);
+    const dateStr = vnD.toLocaleDateString('vi-VN', {timeZone:'UTC'});
+    const timeStr = vnD.toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit', timeZone:'UTC'});
+
+    drawData.push({
+      period,
+      date: dateStr,
+      time: timeStr,
+      numbers: genDraw(period, i)
+    });
+  }
+
+  computeFreq();
+  renderLatestDraw();
+  renderHistory();
+  renderStats();
+  renderStatPrediction();
+  startCountdown();
+  showToast(`📊 Mô phỏng · Kỳ hiện tại #${currentPeriod}`);
+}
+
+// =====================================================================
+// COMPUTE FREQUENCY
+// =====================================================================
+function computeFreq() {
+  freq = {};
+  for (let i = 1; i <= 80; i++) freq[i] = 0;
+  const slice = drawData.slice(0, 50);
+  slice.forEach(d => d.numbers.forEach(n => freq[n]++));
+}
+
+function getHotCold(top = 10) {
+  const sorted = Object.entries(freq).sort((a,b) => b[1]-a[1]);
+  return {
+    hot: sorted.slice(0, top).map(x => +x[0]),
+    cold: sorted.slice(-top).reverse().map(x => +x[0])
+  };
+}
+
+// =====================================================================
+// RENDER: LATEST DRAW
+// =====================================================================
+function renderLatestDraw() {
+  if (!drawData.length) return;
+  const d = drawData[0];
+  document.getElementById('drawPeriod').textContent = `Kỳ #${d.period}`;
+  document.getElementById('drawTime').textContent = d.time || '--:--';
+
+  const el = document.getElementById('latestDraw');
+  el.innerHTML = `<div class="draw-numbers">${d.numbers.map(n => `<div class="draw-num">${n<10?'0'+n:n}</div>`).join('')}</div>`;
+
+  // Update main grid
+  for (let i = 1; i <= 80; i++) {
+    const b = document.getElementById('ball'+i);
+    b.className = 'ball' + (d.numbers.includes(i) ? ' drawn' : '');
+  }
+  // Cập nhật danh sách kỳ trong tab live
+  liveHistoryCount = Math.max(liveHistoryCount, 10);
+  renderLiveHistory();
+}
+
+// =====================================================================
+// RENDER: HISTORY
+// =====================================================================
+function renderHistory() {
+  const el = document.getElementById('historyList');
+  if (!drawData.length) { el.innerHTML = '<div class="text-sm text-muted">Không có dữ liệu.</div>'; return; }
+  el.innerHTML = drawData.slice(0, 50).map(d => `
+    <div class="history-row">
+      <div>
+        <div class="text-sm fw-bold">#${d.period}</div>
+        <div class="text-sm text-muted">${d.date}</div>
+      </div>
+      <div class="h-kq">${d.numbers.map(n => `<div class="h-num">${n<10?'0'+n:n}</div>`).join('')}</div>
+      <div class="text-sm text-muted" style="text-align:right">${d.time||''}</div>
+    </div>
+  `).join('');
+}
+
+// Số kỳ hiển thị trong tab Live
+let liveHistoryCount = 10;
+
+function renderLiveHistory() {
+  const el = document.getElementById('liveHistoryList');
+  if (!el || !drawData.length) return;
+  const highlight = +(document.getElementById('liveHighlight')?.value || 0);
+  const slice = drawData.slice(0, liveHistoryCount);
+
+  el.innerHTML = slice.map((d, idx) => {
+    const isLatest = idx === 0;
+    const balls = d.numbers.map(n => {
+      const isHi = highlight && n === highlight;
+      return `<div class="live-draw-ball${isHi ? ' hi' : ''}">${n<10?'0'+n:n}</div>`;
+    }).join('');
+
+    return `<div class="live-draw-item" style="${isLatest ? 'background:rgba(232,176,32,.04);border-radius:8px;padding:10px 8px;margin-bottom:4px' : ''}">
+      <div class="live-draw-header">
+        <span class="live-draw-period">${isLatest ? '🔴 ' : ''}Kỳ #${d.period}</span>
+        <span class="live-draw-time">${d.date || ''} ${d.time || ''}</span>
+      </div>
+      <div class="live-draw-nums">${balls}</div>
+    </div>`;
+  }).join('');
+
+  // Ẩn nút Xem thêm nếu hết data
+  const btn = document.getElementById('liveLoadMoreBtn');
+  if (btn) btn.style.display = liveHistoryCount >= drawData.length ? 'none' : 'inline-flex';
+}
+
+function loadMoreLiveHistory() {
+  liveHistoryCount = Math.min(liveHistoryCount + 10, drawData.length);
+  renderLiveHistory();
+}
+
+// =====================================================================
+// RENDER: STATS
+// =====================================================================
+function renderStats() {
+  // Frequency bars
+  const max = Math.max(...Object.values(freq));
+  const sorted = Object.entries(freq).sort((a,b) => b[1]-a[1]);
+  
+  document.getElementById('freqBars').innerHTML = sorted.slice(0, 40).map(([n, c]) => {
+    const pct = max > 0 ? (c/max*100) : 0;
+    const isHot = +n === sorted[0][0]*1 || c >= sorted[3][1];
+    const isCold = c <= sorted[sorted.length-4][1];
+    const color = isHot ? 'var(--hot)' : isCold ? 'var(--cold)' : 'var(--accent2)';
+    return `
+      <div class="stat-row">
+        <div class="stat-num" style="color:${color}">${+n<10?'0'+n:n}</div>
+        <div class="stat-bar-wrap"><div class="stat-bar" style="width:${pct}%;background:${color}"></div></div>
+        <div class="stat-count">${c}</div>
+      </div>
+    `;
+  }).join('');
+
+  // Grid view
+  const {hot, cold} = getHotCold(15);
+  const gEl = document.getElementById('statsGridBalls');
+  gEl.innerHTML = '';
+  for (let i = 1; i <= 80; i++) {
+    const b = document.createElement('div');
+    const isHot = hot.includes(i);
+    const isCold = cold.includes(i);
+    b.className = 'ball' + (isHot ? ' hot' : isCold ? ' cold' : '');
+    b.textContent = i < 10 ? '0'+i : i;
+    gEl.appendChild(b);
+  }
+
+  // Hot/cold display
+  const {hot: h, cold: c} = getHotCold(10);
+  document.getElementById('hotNumbers').innerHTML = h.map(n => `<div class="pred-num pred-hot">${n<10?'0'+n:n}</div>`).join('');
+  document.getElementById('coldNumbers').innerHTML = c.map(n => `<div class="pred-num pred-cold">${n<10?'0'+n:n}</div>`).join('');
+
+  // Distribution
+  let even=0, odd=0, low=0, high=0, totalBalls=0;
+  drawData.slice(0,20).forEach(d => {
+    d.numbers.forEach(n => {
+      totalBalls++;
+      if (n%2===0) even++; else odd++;
+      if (n<=40) low++; else high++;
+    });
+  });
+  document.getElementById('distStats').innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;text-align:center">
+      <div class="sum-card">
+        <div class="sum-label">Số chẵn</div>
+        <div class="sum-val neutral">${even} <span class="text-sm text-muted">(${totalBalls?Math.round(even/totalBalls*100):0}%)</span></div>
+      </div>
+      <div class="sum-card">
+        <div class="sum-label">Số lẻ</div>
+        <div class="sum-val neutral">${odd} <span class="text-sm text-muted">(${totalBalls?Math.round(odd/totalBalls*100):0}%)</span></div>
+      </div>
+      <div class="sum-card">
+        <div class="sum-label">Thấp (1–40)</div>
+        <div class="sum-val neutral">${low} <span class="text-sm text-muted">(${totalBalls?Math.round(low/totalBalls*100):0}%)</span></div>
+      </div>
+      <div class="sum-card">
+        <div class="sum-label">Cao (41–80)</div>
+        <div class="sum-val neutral">${high} <span class="text-sm text-muted">(${totalBalls?Math.round(high/totalBalls*100):0}%)</span></div>
+      </div>
+    </div>
+  `;
+}
+
+function showStatsView(v) {
+  document.querySelectorAll('.tab-sub-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('statsBar').style.display = v==='bar' ? 'block' : 'none';
+  document.getElementById('statsGrid').style.display = v==='grid' ? 'block' : 'none';
+}
+
+// =====================================================================
+// RENDER: STAT PREDICTION
+// =====================================================================
+function renderStatPrediction() {
+  const {hot, cold} = getHotCold(5);
+  
+  // Weighted prediction: blend hot/cold + cycle analysis
+  const scores = {};
+  for (let i = 1; i <= 80; i++) {
+    scores[i] = freq[i] || 0;
+    // Add cycle bonus: numbers not drawn recently
+    const lastDraw = drawData.findIndex(d => d.numbers.includes(i));
+    if (lastDraw > 3) scores[i] += 2; // overdue bonus
+    if (lastDraw === 0) scores[i] -= 3; // just drawn penalty
+  }
+  
+  const sorted = Object.entries(scores).sort((a,b) => b[1]-a[1]);
+  const topPred = sorted.slice(0,5).map(x => +x[0]);
+  const cyclePred = sorted.slice(5,10).map(x => +x[0]);
+
+  const el = document.getElementById('statPredNumbers');
+  el.innerHTML = [
+    ...hot.slice(0,5).map(n => `<div class="pred-num pred-hot" title="Số nóng">${n<10?'0'+n:n}</div>`),
+    ...cold.slice(0,5).map(n => `<div class="pred-num pred-cold" title="Số lạnh">${n<10?'0'+n:n}</div>`),
+    ...cyclePred.map(n => `<div class="pred-num pred-ai" title="Gợi ý AI">${n<10?'0'+n:n}</div>`)
+  ].join('');
+}
+
+// =====================================================================
+// AI ANALYSIS (OFFLINE - Thuật toán JS thuần)
+// =====================================================================
+
+// --- Markov Chain: tính xác suất số xuất hiện sau các số trước ---
+function buildMarkovMatrix(data) {
+  const trans = {}; // trans[a][b] = count(b xuất hiện cùng kỳ với a)
+  data.forEach(d => {
+    d.numbers.forEach(a => {
+      if (!trans[a]) trans[a] = {};
+      d.numbers.forEach(b => {
+        if (a !== b) trans[a][b] = (trans[a][b] || 0) + 1;
+      });
+    });
+  });
+  return trans;
+}
+
+// --- Phân tích chu kỳ: số "đến hạn" dựa trên khoảng cách trung bình ---
+function analyzeCycles(data) {
+  const lastSeen = {}, gaps = {}, avgGap = {};
+  for (let n = 1; n <= 80; n++) { gaps[n] = []; lastSeen[n] = -1; }
+  data.forEach((d, i) => {
+    for (let n = 1; n <= 80; n++) {
+      if (d.numbers.includes(n)) {
+        if (lastSeen[n] !== -1) gaps[n].push(i - lastSeen[n]);
+        lastSeen[n] = i;
+      }
+    }
+  });
+  for (let n = 1; n <= 80; n++) {
+    avgGap[n] = gaps[n].length > 0 ? gaps[n].reduce((a,b)=>a+b,0)/gaps[n].length : 4;
+  }
+  return { lastSeen, avgGap };
+}
+
+// --- Phân tích cặp số hay xuất hiện cùng nhau ---
+function findHotPairs(data, topN = 5) {
+  const pairs = {};
+  data.forEach(d => {
+    const nums = d.numbers;
+    for (let i = 0; i < nums.length; i++)
+      for (let j = i+1; j < nums.length; j++) {
+        const key = nums[i]+'-'+nums[j];
+        pairs[key] = (pairs[key]||0) + 1;
+      }
+  });
+  return Object.entries(pairs)
+    .sort((a,b)=>b[1]-a[1])
+    .slice(0, topN)
+    .map(([k,v]) => ({ pair: k.split('-').map(Number), count: v }));
+}
+
+// --- Tính điểm tổng hợp cho mỗi số ---
+function scoreNumbers(data) {
+  const n = data.length;
+  const slice50 = data.slice(0, Math.min(50, n));
+  const slice20 = data.slice(0, Math.min(20, n));
+  const slice10 = data.slice(0, Math.min(10, n));
+
+  // 1. Tần suất theo trọng số thời gian (gần đây = nặng hơn)
+  const freqScore = {};
+  for (let num = 1; num <= 80; num++) freqScore[num] = 0;
+  slice50.forEach((d, i) => {
+    const weight = 1 - (i / slice50.length) * 0.5; // gần nhất weight=1, xa nhất=0.5
+    d.numbers.forEach(num => { freqScore[num] += weight; });
+  });
+
+  // 2. Chu kỳ (overdue score)
+  const { lastSeen, avgGap } = analyzeCycles(slice50);
+  const cycleScore = {};
+  for (let num = 1; num <= 80; num++) {
+    const sinceLastDraw = lastSeen[num] === -1 ? 99 : lastSeen[num];
+    const expected = avgGap[num] || 4;
+    cycleScore[num] = sinceLastDraw / expected; // >1 = quá hạn
+  }
+
+  // 3. Markov: xem số nào hay đi sau các số kỳ gần nhất
+  const trans = buildMarkovMatrix(slice20);
+  const markovScore = {};
+  for (let num = 1; num <= 80; num++) markovScore[num] = 0;
+  if (slice10.length > 0) {
+    slice10[0].numbers.forEach(prev => {
+      if (trans[prev]) {
+        Object.entries(trans[prev]).forEach(([next, cnt]) => {
+          markovScore[+next] += cnt;
+        });
+      }
+    });
+    // Normalize
+    const mmax = Math.max(...Object.values(markovScore), 1);
+    for (let num = 1; num <= 80; num++) markovScore[num] /= mmax;
+  }
+
+  // 4. Phân bố: ưu tiên cân bằng chẵn/lẻ, thấp/cao trong kỳ gần nhất
+  const last5 = data.slice(0, 5);
+  let evenCount = 0, oddCount = 0, lowCount = 0, highCount = 0, total = 0;
+  last5.forEach(d => d.numbers.forEach(n => {
+    total++;
+    if (n%2===0) evenCount++; else oddCount++;
+    if (n<=40) lowCount++; else highCount++;
+  }));
+  const needEven = evenCount < total/2;
+  const needLow  = lowCount  < total/2;
+
+  // 5. Tổng hợp điểm
+  const finalScore = {};
+  for (let num = 1; num <= 80; num++) {
+    const fNorm = freqScore[num] / (slice50.length * 0.75 || 1);
+    const cScore = Math.min(cycleScore[num], 3) / 3;
+    const mScore = markovScore[num];
+    const distBonus = ((num%2===0)===needEven ? 0.15 : 0)
+                    + ((num<=40)===needLow    ? 0.15 : 0);
+    finalScore[num] = fNorm*0.3 + cScore*0.3 + mScore*0.25 + distBonus;
+  }
+  return finalScore;
+}
+
+// --- Main AI analysis function ---
+async function runAIAnalysis(refresh=false) {
+  const btn = document.getElementById('aiBtn');
+  btn.disabled = true;
+
+  document.getElementById('aiOutput').innerHTML = `
+    <div class="ai-box">
+      <div class="ai-thinking">AI đang phân tích<span>.</span><span>.</span><span>.</span></div>
+    </div>`;
+
+  // Nhường luồng để UI update trước
+  await new Promise(r => setTimeout(r, 80));
+
+  try {
+    if (drawData.length < 5) throw new Error('Cần ít nhất 5 kỳ dữ liệu');
+
+    const scores = scoreNumbers(drawData);
+    const sorted = Object.entries(scores).sort((a,b)=>b[1]-a[1]);
+    const top10  = sorted.slice(0, 10).map(x=>+x[0]);
+    const bot10  = sorted.slice(-10).map(x=>+x[0]);
+
+    // Thống kê tần suất
+    const freq50 = {};
+    for (let n=1;n<=80;n++) freq50[n]=0;
+    drawData.slice(0,50).forEach(d=>d.numbers.forEach(n=>freq50[n]++));
+    const sortedFreq = Object.entries(freq50).sort((a,b)=>b[1]-a[1]);
+    const hotNums  = sortedFreq.slice(0,5).map(x=>+x[0]);
+    const coldNums = sortedFreq.slice(-5).map(x=>+x[0]);
+
+    // Cặp số hay xuất hiện cùng
+    const hotPairs = findHotPairs(drawData.slice(0,30), 5);
+
+    // Phân bố 20 kỳ gần nhất
+    let even=0,odd=0,low=0,high=0,tot=0;
+    drawData.slice(0,20).forEach(d=>d.numbers.forEach(n=>{
+      tot++; if(n%2===0)even++;else odd++;
+      if(n<=40)low++;else high++;
+    }));
+    const ePct = Math.round(even/tot*100), oPct = 100-ePct;
+    const lPct = Math.round(low/tot*100),  hPct = 100-lPct;
+
+    // Chu kỳ
+    const {lastSeen, avgGap} = analyzeCycles(drawData.slice(0,50));
+    const overdue = [];
+    for(let n=1;n<=80;n++){
+      if(lastSeen[n] !== -1 && lastSeen[n] > avgGap[n]*1.5) overdue.push(n);
+    }
+    overdue.sort((a,b)=>lastSeen[b]-lastSeen[a]);
+
+    // Gợi ý cuối: blend top10 score với overdue
+    const suggested = [...new Set([...top10, ...overdue.slice(0,3)])].slice(0,10);
+
+    // Tạo nhận xét
+    const trendNote = ePct > 55 ? 'nghiêng về số chẵn' : ePct < 45 ? 'nghiêng về số lẻ' : 'cân bằng chẵn/lẻ';
+    const rangeNote = lPct > 55 ? 'ưu thế số thấp (1–40)' : lPct < 45 ? 'ưu thế số cao (41–80)' : 'phân bố đều thấp/cao';
+
+    const analysis = `Trong 20 kỳ gần nhất, tỷ lệ chẵn/lẻ là ${ePct}%/${oPct}% (${trendNote}), thấp/cao là ${lPct}%/${hPct}% (${rangeNote}). Số nóng nhất: ${hotNums.slice(0,3).join(', ')}. Số lạnh nhất: ${coldNums.slice(0,3).join(', ')}. Có ${overdue.length} số đang quá hạn chu kỳ trung bình.`;
+
+    const reasoning = `Kết hợp 4 yếu tố: tần suất có trọng số thời gian (30%), chu kỳ overdue (30%), chuỗi Markov (25%), cân bằng phân bố (15%). Số được chọn có điểm tổng hợp cao nhất.`;
+
+    aiSuggestedNums = suggested;
+
+    document.getElementById('aiOutput').innerHTML = `
+      <div class="ai-box">
+        <p><strong>📊 Phân tích:</strong><br>${analysis}</p>
+        <div class="divider"></div>
+        <p><strong>💡 Phương pháp:</strong><br>${reasoning}</p>
+        <div class="divider"></div>
+        <p><strong>🔗 Cặp số hay xuất hiện cùng:</strong><br>${hotPairs.map(p=>`<span style="background:rgba(59,130,246,.15);border-radius:20px;padding:2px 8px;font-size:11px;margin:2px;display:inline-block">${p.pair[0]}-${p.pair[1]} (${p.count}x)</span>`).join(' ')}</p>
+        ${overdue.length ? `<div class="divider"></div><p><strong>⏰ Số quá hạn chu kỳ:</strong> ${overdue.slice(0,8).join(', ')}</p>` : ''}
+        <div class="divider"></div>
+        <p style="font-size:11px;color:var(--muted)">🔌 Chạy 100% offline — không cần internet</p>
+      </div>`;
+
+    document.getElementById('aiNumbers').innerHTML = aiSuggestedNums.map(n =>
+      `<div class="pred-num pred-ai">${n<10?'0'+n:n}</div>`).join('');
+
+  } catch(e) {
+    document.getElementById('aiOutput').innerHTML =
+      `<div class="text-sm text-red">Lỗi phân tích: ${e.message}</div>`;
+  }
+
+  btn.disabled = false;
+}
+
+function importAIToAutoplay() {
+  if (!aiSuggestedNums.length) { showToast('⚠️ Chạy phân tích AI trước'); return; }
+  selectedNums = [...aiSuggestedNums];
+  renderSelectedNums();
+  // Update AP grid
+  for (let i = 1; i <= 80; i++) {
+    const cells = document.getElementById('apGrid').children;
+    cells[i-1].className = 'ball' + (selectedNums.includes(i) ? ' selected' : '');
+  }
+  switchTab('autoplay');
+  showToast('✅ Đã import ' + selectedNums.length + ' số từ AI');
+}
+
+// =====================================================================
+// COUNTDOWN
+// =====================================================================
+function startCountdown() {
+  if (countdownTimer) clearInterval(countdownTimer);
+  const INTERVAL = 10 * 60; // 10 phút
+  let lastPeriod = drawData.length ? drawData[0].period : 0;
+
+  function tick() {
+    const now = new Date();
+    // Tính giây VN trong 10 phút
+    const vnSecs = ((now.getUTCHours() + 7) % 24) * 3600
+                 + now.getUTCMinutes() * 60
+                 + now.getUTCSeconds();
+    const rem = INTERVAL - (vnSecs % INTERVAL);
+    const m = Math.floor(rem / 60);
+    const s = rem % 60;
+    document.getElementById('countdown').textContent = `${m}:${s<10?'0'+s:s}`;
+    document.getElementById('progressBar').style.width = ((INTERVAL - rem) / INTERVAL * 100) + '%';
+
+    // Khi đếm ngược về 0 (rem = INTERVAL tức là vừa sang kỳ mới)
+    if (rem === INTERVAL || rem === INTERVAL - 1) {
+      const newPeriod = calcCurrentPeriod();
+      if (newPeriod !== lastPeriod && drawData.length) {
+        lastPeriod = newPeriod;
+        addNewDemoDraw(newPeriod);
+      }
+    }
+  }
+  tick();
+  countdownTimer = setInterval(tick, 1000);
+}
+
+function addNewDemoDraw(period) {
+  const now = new Date();
+  const vnMs = now.getTime() + 7 * 3600 * 1000;
+  const vnD = new Date(vnMs);
+  const nums = genDraw(period, 0);
+  const newDraw = {
+    period,
+    date: vnD.toLocaleDateString('vi-VN', {timeZone:'UTC'}),
+    time: vnD.toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit', timeZone:'UTC'}),
+    numbers: nums
+  };
+  // Thêm vào đầu drawData
+  drawData.unshift(newDraw);
+  if (drawData.length > 200) drawData.pop(); // giữ tối đa 200 kỳ
+  computeFreq();
+  renderLatestDraw();
+  renderLiveHistory();
+  showToast(`🔴 Kỳ mới #${period} vừa xổ!`, 3000);
+}
+
+// =====================================================================
+// AUTO PLAY
+// =====================================================================
+function toggleMode() {
+  const mode = document.getElementById('playMode').value;
+  document.getElementById('modeBac').style.display = mode==='bac' ? 'block' : 'none';
+  document.getElementById('modeBao').style.display = mode==='bao' ? 'block' : 'none';
+  if (mode === 'bao') updateBaoInfo();
+}
+
+function updateBaoInfo() {
+  const baoN   = +document.getElementById('baoType').value;
+  const picks  = selectedNums.length;
+  const bet    = +document.getElementById('betAmount').value || 10000;
+  const total  = picks >= baoN ? comb(picks, baoN) : 0;
+  const cost   = total * 10000;
+  const prize  = (BAO_BASE_PRIZE[baoN] || 0).toLocaleString('vi-VN');
+  const el = document.getElementById('baoInfo');
+  if (!el) return;
+  if (picks < baoN) {
+    el.innerHTML = `<span style="color:var(--red)">⚠️ Cần chọn ít nhất ${baoN} số</span>`;
+  } else {
+    el.innerHTML = `Chọn ${picks} số → <strong>${total.toLocaleString()}</strong> tổ hợp · Tiền cược: <strong style="color:var(--accent)">${cost.toLocaleString('vi-VN')}đ</strong> · Mỗi tổ hợp trúng: <strong style="color:var(--green)">${prize}đ</strong>`;
+  }
+}
+
+function updateBacInfo() {
+  const lv = +document.getElementById('bacLevel').value;
+  const def = BAC_PRIZE[lv];
+  if (!def) return;
+  const rows = def.tiers.map(t =>
+    `<tr><td style="color:var(--muted);font-size:11px">Trùng ${t.match === 0 ? '0' : t.match} số</td>` +
+    `<td style="text-align:right;font-size:11px;color:var(--accent);font-weight:700">${(t.prize/1000).toLocaleString('vi-VN')}K</td></tr>`
+  ).join('');
+  document.getElementById('bacInfo').innerHTML =
+    `<div style="font-size:11px;color:var(--muted);margin-bottom:4px">Chọn ${lv} số — Bảng giải:</div>
+     <table style="width:100%;border-collapse:collapse">${rows}</table>`;
+}
+
+function toggleAPBall(num, el) {
+  if (selectedNums.includes(num)) {
+    selectedNums = selectedNums.filter(n => n !== num);
+    el.className = 'ball';
+  } else {
+    selectedNums.push(num);
+    el.className = 'ball selected';
+  }
+  renderSelectedNums();
+}
+
+function addNumber() {
+  const v = +document.getElementById('numInput').value;
+  if (v < 1 || v > 80 || !v) { showToast('⚠️ Nhập số từ 1 đến 80'); return; }
+  if (selectedNums.includes(v)) { showToast('⚠️ Số đã được chọn'); return; }
+  selectedNums.push(v);
+  renderSelectedNums();
+  // update grid
+  const idx = v - 1;
+  document.getElementById('apGrid').children[idx].className = 'ball selected';
+  document.getElementById('numInput').value = '';
+}
+
+function clearNumbers() {
+  selectedNums = [];
+  renderSelectedNums();
+  buildAPGrid();
+}
+
+function renderSelectedNums() {
+  const el = document.getElementById('selectedNumbers');
+  el.innerHTML = selectedNums.sort((a,b)=>a-b).map(n =>
+    `<span class="number-tag" onclick="removeNum(${n})">${n<10?'0'+n:n}</span>`).join('');
+}
+
+function removeNum(n) {
+  selectedNums = selectedNums.filter(x => x !== n);
+  renderSelectedNums();
+  const idx = n - 1;
+  if (document.getElementById('apGrid').children[idx])
+    document.getElementById('apGrid').children[idx].className = 'ball';
+}
+
+function updateStartFromUI() {
+  if (!drawData.length) return;
+  const first = drawData[drawData.length - 1];
+  const current = drawData[0];
+  document.getElementById('firstKyLabel').textContent = '#' + first.period;
+  document.getElementById('currentKyLabel').textContent = '#' + current.period;
+
+  const isFirst = document.getElementById('startFromFirst').checked;
+  document.getElementById('lbl-first').style.borderColor = isFirst ? 'var(--accent2)' : 'var(--border)';
+  document.getElementById('lbl-current').style.borderColor = !isFirst ? 'var(--accent2)' : 'var(--border)';
+
+  if (isFirst) {
+    const total = drawData.length;
+    document.getElementById('startFromInfo').textContent =
+      `Sẽ phát lại ${total} kỳ lịch sử từ đầu theo thứ tự thời gian thực.`;
+  } else {
+    document.getElementById('startFromInfo').textContent =
+      'Mỗi kỳ sẽ quay số ngẫu nhiên mô phỏng như kỳ mới nhất.';
+  }
+}
+
+async function startAutoPlay() {
+  if (!selectedNums.length) { showToast('⚠️ Chọn ít nhất 1 số'); return; }
+  const bet = +document.getElementById('betAmount').value;
+  if (bet < 10000) { showToast('⚠️ Mức cược tối thiểu 10,000 VND'); return; }
+  if (apSession.balance < bet) { showToast('⚠️ Số dư không đủ'); return; }
+
+  autoPlaying = true;
+  document.getElementById('startBtn').disabled = true;
+  document.getElementById('stopBtn').disabled = false;
+
+  const totalRounds = +document.getElementById('apRoundsInput').value;
+  const speed = +document.getElementById('apSpeed').value * 1000;
+  let roundsDone = 0;
+
+  async function doRound() {
+    if (!autoPlaying || roundsDone >= totalRounds || apSession.balance < bet) {
+      stopAutoPlay();
+      return;
+    }
+
+    roundsDone++;
+    apSession.rounds++;
+    apSession.balance -= bet;
+
+    // Get draw: either from history or random
+    const useHistory = document.getElementById('startFromFirst').checked;
+    let draw, drawPeriod;
+    if (useHistory && drawData.length > 0) {
+      // Play through history from oldest to newest, cycling if needed
+      const histIdx = (drawData.length - 1) - ((roundsDone - 1) % drawData.length);
+      const histDraw = drawData[histIdx];
+      draw = [...histDraw.numbers];
+      drawPeriod = histDraw.period;
+    } else {
+      draw = [];
+      while (draw.length < 20) {
+        const n = Math.floor(Math.random()*80)+1;
+        if (!draw.includes(n)) draw.push(n);
+      }
+      draw.sort((a,b)=>a-b);
+      drawPeriod = null;
+    }
+
+    // Check win — theo bảng giải Vietlott chính thức
+    const mode = document.getElementById('playMode').value;
+    let won = false, prize = 0;
+    const matches = selectedNums.filter(n => draw.includes(n));
+    let resultNote = '';
+
+    if (mode === 'bac') {
+      const lv = +document.getElementById('bacLevel').value;
+      prize = calcBacPrize(lv, selectedNums.length, matches.length, bet);
+      won = prize > 0;
+      resultNote = `Trùng ${matches.length}/${lv}`;
+    } else {
+      const baoN = +document.getElementById('baoType').value;
+      const res  = calcBaoPrize(baoN, selectedNums.length, draw, selectedNums, bet);
+      prize = res.prize;
+      won   = prize > 0;
+      resultNote = `${res.winCombs}/${res.totalCombs} tổ hợp trúng`;
+    }
+
+    if (won) {
+      apSession.wins++;
+      apSession.balance += prize;
+    }
+
+    // Render current round
+    document.getElementById('noRound').style.display = 'none';
+    document.getElementById('currentRound').style.display = 'block';
+    document.getElementById('apRoundLabel').textContent = drawPeriod ? `Kỳ #${drawPeriod} (lượt ${apSession.rounds})` : `Kỳ ${apSession.rounds}`;
+    document.getElementById('apRoundResult').innerHTML = won
+      ? `<span class="text-green">THẮNG +${formatNum(Math.round(prize-bet))} <span style="font-size:11px;font-weight:400">(${resultNote})</span></span>`
+      : `<span class="text-red">THUA -${formatNum(bet)} <span style="font-size:11px;font-weight:400">(${resultNote})</span></span>`;
+    document.getElementById('apCurrentDraw').innerHTML = draw.map(n =>
+      `<div class="draw-num" style="${selectedNums.includes(n)?'background:var(--green)':''}">${n<10?'0'+n:n}</div>`).join('');
+    document.getElementById('apYourNumbers').innerHTML = selectedNums.sort((a,b)=>a-b).map(n =>
+      `<div class="draw-num" style="background:${draw.includes(n)?'var(--green)':'var(--surface2)'};color:${draw.includes(n)?'#fff':'var(--muted)'}">${n<10?'0'+n:n}</div>`).join('');
+
+    // Log
+    apSession.log.unshift({
+      round: apSession.rounds,
+      draw: draw.slice(0,5),
+      matches: matches.length,
+      won, prize, bet
+    });
+    renderAPLog();
+    updateAPSummary();
+
+    autoPlayTimer = setTimeout(doRound, speed);
+  }
+
+  doRound();
+}
+
+function stopAutoPlay() {
+  autoPlaying = false;
+  if (autoPlayTimer) clearTimeout(autoPlayTimer);
+  document.getElementById('startBtn').disabled = false;
+  document.getElementById('stopBtn').disabled = true;
+}
+
+function resetAutoPlay() {
+  stopAutoPlay();
+  apSession = { balance: 1_000_000, startBalance: 1_000_000, rounds: 0, wins: 0, log: [] };
+  updateAPSummary();
+  document.getElementById('apLog').innerHTML = '<div class="text-sm text-muted">Chưa có dữ liệu.</div>';
+  document.getElementById('noRound').style.display = 'block';
+  document.getElementById('currentRound').style.display = 'none';
+}
+
+function renderAPLog() {
+  const el = document.getElementById('apLog');
+  if (!apSession.log.length) { el.innerHTML = '<div class="text-sm text-muted">Chưa có dữ liệu.</div>'; return; }
+  el.innerHTML = apSession.log.slice(0, 50).map(r => `
+    <div class="ap-log-row">
+      <span class="text-muted">Kỳ ${r.round}</span>
+      <span class="text-muted">Khớp: ${r.matches}</span>
+      <span class="ap-result ${r.won?'ap-win':'ap-lose'}">
+        ${r.won ? '+'+formatNum(Math.round(r.prize-r.bet)) : '-'+formatNum(r.bet)}
+      </span>
+    </div>
+  `).join('');
+}
+
+function updateAPSummary() {
+  const pnl = apSession.balance - apSession.startBalance;
+  document.getElementById('apBalance').textContent = formatNum(apSession.balance);
+  document.getElementById('apPnL').textContent = (pnl>=0?'+':'')+formatNum(pnl);
+  document.getElementById('apPnL').className = 'sum-val ' + (pnl>0?'pos':pnl<0?'neg':'neutral');
+  document.getElementById('apRounds').textContent = apSession.rounds;
+  document.getElementById('apWinRate').textContent = apSession.rounds ? Math.round(apSession.wins/apSession.rounds*100)+'%' : '–';
+  document.getElementById('apBalance').className = 'sum-val ' + (apSession.balance>apSession.startBalance?'pos':apSession.balance<apSession.startBalance?'neg':'neutral');
+  document.getElementById('balanceChip').textContent = '💰 ' + formatNum(apSession.balance);
+}
+
+// =====================================================================
+// LƯU / TẢI TRỌNG SỐ (localStorage — tự lưu sau mỗi lần học)
+// =====================================================================
+
+const LS_KEY = 'kenoAI_learnState';
+
+function saveLearnState() {
+  try {
+    const toSave = {
+      weights:      learnState.weights,
+      bestNums:     learnState.bestNums,
+      bestHits:     learnState.bestHits,
+      gen:          learnState.gen,
+      sumHits:      learnState.sumHits,
+      hits10:       learnState.hits10,
+      hitHistory:   learnState.hitHistory.slice(-200),
+      temperature:  learnState.temperature,
+      learningRate: learnState.learningRate,
+      savedAt:      new Date().toISOString(),
+      savedDate:    new Date().toLocaleDateString('vi-VN'),
+    };
+    localStorage.setItem(LS_KEY, JSON.stringify(toSave));
+  } catch(e) { console.warn('Không lưu được:', e.message); }
+}
+
+function loadLearnState() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return false;
+    const saved = JSON.parse(raw);
+    if (!saved.weights || !Object.keys(saved.weights).length) return false;
+
+    learnState.weights      = saved.weights;
+    learnState.bestNums     = saved.bestNums     || [];
+    learnState.bestHits     = saved.bestHits     || 0;
+    learnState.gen          = saved.gen          || 0;
+    learnState.sumHits      = saved.sumHits      || 0;
+    learnState.hits10       = saved.hits10       || 0;
+    learnState.hitHistory   = saved.hitHistory   || [];
+    learnState.temperature  = saved.temperature  || 0.3;
+    learnState.learningRate = saved.learningRate || 0.05;
+    return saved;
+  } catch(e) { return false; }
+}
+
+function clearSavedState() {
+  localStorage.removeItem(LS_KEY);
+  showToast('🗑️ Đã xóa dữ liệu học đã lưu');
+}
+
+function clearSavedAndReset() {
+  resetLearning();
+  showToast('🗑️ Đã xóa & reset toàn bộ');
+}
+
+function getSavedInfo() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw);
+    return s.savedAt ? s : null;
+  } catch(e) { return null; }
+}
+
+// =====================================================================
+// LEARNING ENGINE — Học từ các kỳ hôm nay, gợi ý kỳ tiếp theo
+// =====================================================================
+
+let learnState = {
+  weights: {},
+  bestNums: [],
+  bestHits: 0,
+  gen: 0,
+  sumHits: 0,
+  hits10: 0,
+  hitHistory: [],
+  todayDraws: [],     // chỉ học từ các kỳ hôm nay
+  learningTimer: null,
+  running: false,
+  learningRate: 0.18,
+  temperature: 1.0,
+};
+
+// Lấy các kỳ hôm nay (từ kỳ đầu tiên đến kỳ hiện tại trong ngày)
+function getTodayDraws() {
+  if (!drawData.length) return [];
+  const latestDate = drawData[0].date;
+  // Lọc tất cả kỳ cùng ngày với kỳ mới nhất, sắp từ cũ → mới
+  const today = drawData.filter(d => d.date === latestDate);
+  return today.slice().reverse(); // cũ → mới
+}
+
+function getLearnTarget() {
+  return +(document.getElementById('learnTarget')?.value || 10);
+}
+function getPickCount() {
+  return +(document.getElementById('learnPickCount')?.value || 10);
+}
+
+function initWeights(forceReset = false) {
+  // Luôn lấy kỳ hôm nay
+  learnState.todayDraws = getTodayDraws();
+
+  // Thử load từ localStorage trước
+  if (!forceReset) {
+    const saved = loadLearnState();
+    if (saved) {
+      const savedDate = saved.savedDate || '';
+      const today = new Date().toLocaleDateString('vi-VN');
+      const isToday = savedDate === today;
+      const genStr = saved.gen ? saved.gen.toLocaleString() : '0';
+      const info = document.getElementById('learnDataInfo');
+      if (info) {
+        if (learnState.todayDraws.length) {
+          const first = learnState.todayDraws[0];
+          const last  = learnState.todayDraws[learnState.todayDraws.length - 1];
+          info.textContent = `Học từ ${learnState.todayDraws.length} kỳ hôm nay: #${first.period} → #${last.period}`;
+        }
+      }
+      document.getElementById('learnTodayCount').textContent = learnState.todayDraws.length;
+      renderLearnUI();
+      renderSavedBadge(saved);
+      showToast(`📂 Đã tải ${genStr} thế hệ học${isToday ? ' hôm nay' : ' (' + savedDate + ')'}`);
+      return;
+    }
+  }
+
+  // Không có save → khởi tạo từ thống kê
+  const scores = scoreNumbers(drawData);
+  const vals = Object.values(scores);
+  const minV = Math.min(...vals), maxV = Math.max(...vals);
+  for (let n = 1; n <= 80; n++) {
+    learnState.weights[n] = maxV > minV
+      ? 0.25 + 0.75 * (scores[n] - minV) / (maxV - minV)
+      : 0.5;
+  }
+
+  const info = document.getElementById('learnDataInfo');
+  if (info && learnState.todayDraws.length) {
+    const first = learnState.todayDraws[0];
+    const last  = learnState.todayDraws[learnState.todayDraws.length - 1];
+    info.textContent = `Học từ ${learnState.todayDraws.length} kỳ hôm nay: #${first.period} → #${last.period}`;
+  }
+  document.getElementById('learnTodayCount').textContent = learnState.todayDraws.length;
+}
+
+function renderSavedBadge(saved) {
+  const el = document.getElementById('learnSavedBadge');
+  if (!el || !saved) return;
+  const d = new Date(saved.savedAt);
+  const timeStr = d.toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit'});
+  el.style.display = 'flex';
+  el.innerHTML = `<span style="color:var(--green)">💾 Đã lưu</span>
+    <span style="color:var(--muted);font-size:11px">${saved.savedDate} ${timeStr} · ${(saved.gen||0).toLocaleString()} thế hệ · Kỷ lục: ${saved.bestHits||0} trùng</span>
+    <button class="btn btn-ghost" style="padding:2px 8px;font-size:11px;margin-left:auto" onclick="clearSavedAndReset()">🗑️ Xóa</button>`;
+}
+
+// Softmax sampling theo trọng số + nhiệt độ
+function sampleNumbers(count) {
+  const T = Math.max(learnState.temperature, 0.05);
+  const logits = [];
+  for (let n = 1; n <= 80; n++) logits.push({ n, v: Math.exp(learnState.weights[n] / T) });
+  const total = logits.reduce((s, x) => s + x.v, 0);
+  logits.forEach(x => x.p = x.v / total);
+
+  const chosen = [];
+  let attempts = 0;
+  while (chosen.length < count && attempts < 500) {
+    attempts++;
+    const r = Math.random();
+    let cum = 0;
+    for (const item of logits) {
+      cum += item.p;
+      if (r <= cum && !chosen.includes(item.n)) { chosen.push(item.n); break; }
+    }
+  }
+  // Fallback: fill if needed
+  while (chosen.length < count) {
+    const n = Math.floor(Math.random() * 80) + 1;
+    if (!chosen.includes(n)) chosen.push(n);
+  }
+  return chosen.sort((a, b) => a - b);
+}
+
+// Cập nhật trọng số
+function updateWeights(predicted, actual, hits, target) {
+  const lr = learnState.learningRate;
+  const reward = hits / target;
+
+  predicted.forEach(n => {
+    if (actual.includes(n)) {
+      learnState.weights[n] = Math.min(1.0, learnState.weights[n] + lr * (0.5 + 0.5 * reward));
+    } else {
+      learnState.weights[n] = Math.max(0.05, learnState.weights[n] - lr * 0.25 * (1 - reward * 0.5));
+    }
+  });
+  actual.forEach(n => {
+    if (!predicted.includes(n)) {
+      learnState.weights[n] = Math.min(1.0, learnState.weights[n] + lr * 0.08);
+    }
+  });
+
+  learnState.temperature   = Math.max(0.08, learnState.temperature   * 0.993);
+  learnState.learningRate  = Math.max(0.03, learnState.learningRate   * 0.999);
+}
+
+// Một vòng học trên 1 kỳ hôm nay
+function learnOneRound() {
+  const draws = learnState.todayDraws;
+  if (!draws.length) return null;
+
+  const target    = getLearnTarget();
+  const pickCount = getPickCount();
+
+  // Xoay vòng qua các kỳ hôm nay (từ đầu đến cuối rồi lặp)
+  const idx    = learnState.gen % draws.length;
+  const actual = draws[idx].numbers;
+  const period = draws[idx].period;
+
+  const predicted = sampleNumbers(pickCount);
+  const hits      = predicted.filter(n => actual.includes(n)).length;
+
+  learnState.gen++;
+  learnState.sumHits += hits;
+  learnState.hitHistory.push(hits);
+  if (learnState.hitHistory.length > 200) learnState.hitHistory.shift();
+  if (hits >= target) learnState.hits10++;
+
+  if (hits > learnState.bestHits || learnState.bestNums.length === 0) {
+    learnState.bestHits = hits;
+    learnState.bestNums = [...predicted];
+  }
+
+  updateWeights(predicted, actual, hits, target);
+  return { predicted, actual, hits, period };
+}
+
+// ── Web Worker source (chạy trong background thread) ──────────────
+function buildWorkerCode(draws, weights, target, pickCount, temperature, learningRate, gen, maxGens, stopMode) {
+  return `
+    let w = ${JSON.stringify(weights)};
+    let temp = ${temperature};
+    let lr = ${learningRate};
+    let gen = ${gen};
+    const draws = ${JSON.stringify(draws)};
+    const target = ${target};
+    const pickCount = ${pickCount};
+    const maxGens = ${maxGens};
+    const stopMode = '${stopMode}';
+    let bestHits = 0, bestNums = [], sumHits = 0, hits10 = 0;
+    const hitHistory = [];
+
+    function sample() {
+      const T = Math.max(temp, 0.05);
+      const logits = [], nums = [];
+      for (let n = 1; n <= 80; n++) {
+        logits.push(Math.exp(w[n] / T));
+        nums.push(n);
+      }
+      const total = logits.reduce((a,b)=>a+b,0);
+      const probs = logits.map(v => v/total);
+      const chosen = [];
+      let attempts = 0;
+      while (chosen.length < pickCount && attempts < 600) {
+        attempts++;
+        const r = Math.random(); let cum = 0;
+        for (let i = 0; i < 80; i++) {
+          cum += probs[i];
+          if (r <= cum && !chosen.includes(nums[i])) { chosen.push(nums[i]); break; }
+        }
+      }
+      while (chosen.length < pickCount) {
+        const n = Math.floor(Math.random()*80)+1;
+        if (!chosen.includes(n)) chosen.push(n);
+      }
+      return chosen.sort((a,b)=>a-b);
+    }
+
+    function runBatch(size) {
+      for (let i = 0; i < size; i++) {
+        const idx = gen % draws.length;
+        const actual = draws[idx].numbers;
+        const predicted = sample();
+        const hits = predicted.filter(n => actual.includes(n)).length;
+        gen++; sumHits += hits; hitHistory.push(hits);
+        if (hitHistory.length > 200) hitHistory.shift();
+        if (hits >= target) { hits10++; consecutiveHits++; } else { consecutiveHits = 0; }
+        if (hits > bestHits || bestNums.length === 0) { bestHits = hits; bestNums = [...predicted]; }
+
+        const reward = hits / target;
+        predicted.forEach(n => {
+          if (actual.includes(n)) w[n] = Math.min(1.0, w[n] + lr*(0.5+0.5*reward));
+          else w[n] = Math.max(0.05, w[n] - lr*0.25*(1-reward*0.5));
+        });
+        actual.forEach(n => { if (!predicted.includes(n)) w[n] = Math.min(1.0, w[n]+lr*0.08); });
+        temp = Math.max(0.08, temp * 0.9995);
+        lr   = Math.max(0.03, lr   * 0.9998);
+      }
+    }
+
+    // Chạy liên tục, gửi kết quả về main thread mỗi 500 vòng
+    // Tự dừng khi: đạt mục tiêu liên tiếp 3 lần, hoặc hội tụ (temp quá thấp)
+    let consecutiveHits = 0;
+    let intervalId = null;
+    function loop() {
+      runBatch(500);
+      const done = (stopMode === 'target' && bestHits >= target && consecutiveHits >= 3)
+                || (stopMode !== 'target' && stopMode !== 'never' && gen >= maxGens);
+      postMessage({ weights: w, gen, bestHits, bestNums, sumHits, hits10,
+                    hitHistory: hitHistory.slice(-200), temperature: temp, learningRate: lr,
+                    done, consecutiveHits });
+      if (done) { clearInterval(intervalId); }
+    }
+    // Đếm lần đạt mục tiêu liên tiếp trong runBatch
+    const _origRunBatch = runBatch;
+    // Track trong loop
+    intervalId = setInterval(loop, 0);
+  `;
+}
+
+let learnWorker = null;
+
+function startLearning() {
+  if (!drawData.length) { showToast('⚠️ Cần có dữ liệu trước'); return; }
+  if (learnState.gen === 0) initWeights();
+  if (!learnState.todayDraws.length) {
+    learnState.todayDraws = drawData.slice().reverse();
+    showToast('⚠️ Dùng toàn bộ lịch sử');
+  }
+
+  learnState.running = true;
+  document.getElementById('learnStartBtn').disabled = true;
+  document.getElementById('learnStopBtn').disabled  = false;
+
+  // Khởi động Web Worker
+  if (learnWorker) learnWorker.terminate();
+  const stopMode = document.getElementById('learnStopMode')?.value || 'target';
+  const maxGensMap = { gens_100k: 100000, gens_500k: 500000, gens_1m: 1000000, target: 999999999, never: 999999999 };
+  const maxGens = maxGensMap[stopMode] || 999999999;
+  const code = buildWorkerCode(
+    learnState.todayDraws,
+    learnState.weights,
+    getLearnTarget(),
+    getPickCount(),
+    learnState.temperature,
+    learnState.learningRate,
+    learnState.gen,
+    maxGens,
+    stopMode
+  );
+  const blob = new Blob([code], { type: 'application/javascript' });
+  learnWorker = new Worker(URL.createObjectURL(blob));
+
+  // Nhận kết quả từ worker, cập nhật UI
+  learnWorker.onmessage = (e) => {
+    const d = e.data;
+    learnState.weights      = d.weights;
+    learnState.gen          = d.gen;
+    learnState.bestHits     = d.bestHits;
+    learnState.bestNums     = d.bestNums;
+    learnState.sumHits      = d.sumHits;
+    learnState.hits10       = d.hits10;
+    learnState.hitHistory   = d.hitHistory;
+    learnState.temperature  = d.temperature;
+    learnState.learningRate = d.learningRate;
+    renderLearnUI();
+    drawLearnChart();
+    saveLearnState(); // tự lưu sau mỗi batch
+    renderSavedBadge(getSavedInfo());
+
+    // Tự dừng khi đạt mục tiêu
+    if (d.done) {
+      learnWorker.terminate(); learnWorker = null;
+      learnState.running = false;
+      document.getElementById('learnStartBtn').disabled = false;
+      document.getElementById('learnStopBtn').disabled  = true;
+      renderNextSuggestion();
+      saveLearnState();
+      renderSavedBadge(getSavedInfo());
+      showToast(`🎯 Đạt mục tiêu! ${learnState.gen.toLocaleString()} vòng · ${learnState.bestHits}/${getLearnTarget()} trùng`, 4000);
+    }
+  };
+  learnWorker.onerror = (e) => {
+    console.error('Worker error:', e.message);
+    stopLearning();
+    showToast('❌ Lỗi Worker: ' + e.message);
+  };
+
+  showToast('🧠 Đang học tốc độ cao từ ' + learnState.todayDraws.length + ' kỳ...');
+}
+
+function stopLearning() {
+  learnState.running = false;
+  if (learnWorker) { learnWorker.terminate(); learnWorker = null; }
+  document.getElementById('learnStartBtn').disabled = false;
+  document.getElementById('learnStopBtn').disabled  = true;
+  renderNextSuggestion();
+  saveLearnState();
+  renderSavedBadge(getSavedInfo());
+  showToast(`⏹ Dừng · đã lưu — ${learnState.gen.toLocaleString()} vòng · kỷ lục: ${learnState.bestHits}/${getLearnTarget()} trùng`);
+}
+
+function resetLearning() {
+  stopLearning();
+  if (learnWorker) { learnWorker.terminate(); learnWorker = null; }
+  learnState = {
+    weights: {}, bestNums: [], bestHits: 0, gen: 0,
+    sumHits: 0, hits10: 0, hitHistory: [], todayDraws: [],
+    learningTimer: null, running: false,
+    learningRate: 0.18, temperature: 1.0,
+  };
+  renderLearnUI();
+  const canvas = document.getElementById('learnChart');
+  if (canvas) { const ctx = canvas.getContext('2d'); ctx.clearRect(0, 0, canvas.width, canvas.height); }
+  document.getElementById('learnNextNumbers').innerHTML = '';
+  document.getElementById('learnNextInfo').textContent  = 'Học xong để xem gợi ý so với kỳ hiện tại.';
+  document.getElementById('learnCompare').style.display = 'none';
+  clearSavedState(); renderSavedBadge(null); showToast('↺ Đã reset và xóa dữ liệu học đã lưu');
+}
+
+// Gợi ý số cho kỳ tiếp theo dựa trên trọng số đã học
+function renderNextSuggestion() {
+  if (!Object.keys(learnState.weights).length) return;
+  const count   = getPickCount();
+  const target  = getLearnTarget();
+
+  // Dùng greedy top-N từ trọng số (không random — lấy tốt nhất đã học)
+  const ranked  = Object.entries(learnState.weights).sort((a,b)=>b[1]-a[1]);
+  const topNums = ranked.slice(0, count).map(x => +x[0]).sort((a,b)=>a-b);
+
+  learnState.bestNums = topNums; // cập nhật best = greedy sau học
+
+  const el = document.getElementById('learnNextNumbers');
+  el.innerHTML = topNums.map(n =>
+    `<div class="pred-num" style="background:rgba(168,85,247,.2);border:2px solid #a855f7;color:#a855f7">${n<10?'0'+n:n}</div>`
+  ).join('');
+
+  const latest = drawData[0];
+  document.getElementById('learnNextInfo').textContent =
+    `Gợi ý ${count} số cho kỳ #${latest ? latest.period + 1 : '?'} · Mục tiêu trùng ≥${target}`;
+}
+
+// So sánh gợi ý với kỳ mới nhất hiện tại
+function compareWithLatest() {
+  if (!learnState.bestNums.length) { showToast('⚠️ Học trước đã'); return; }
+  if (!drawData.length) { showToast('⚠️ Không có dữ liệu'); return; }
+
+  renderNextSuggestion();
+
+  const latest  = drawData[0];
+  const hits    = learnState.bestNums.filter(n => latest.numbers.includes(n));
+  const misses  = learnState.bestNums.filter(n => !latest.numbers.includes(n));
+
+  document.getElementById('learnCompare').style.display = 'block';
+  document.getElementById('cmpPeriod').textContent = latest.period;
+  document.getElementById('cmpHits').textContent   = `${hits.length} / ${learnState.bestNums.length} số`;
+
+  // Hiển thị 20 số kỳ thực với highlight trùng
+  document.getElementById('cmpActual').innerHTML = latest.numbers.map(n => {
+    const isHit = learnState.bestNums.includes(n);
+    return `<div class="draw-num" style="background:${isHit?'var(--green)':'var(--surface2)'};color:${isHit?'#fff':'var(--muted)'};border:1px solid ${isHit?'var(--green)':'var(--border)'}">${n<10?'0'+n:n}</div>`;
+  }).join('');
+
+  showToast(`🔍 Trùng ${hits.length} số với kỳ #${latest.period}`);
+}
+
+function applyLearnedNumbers() {
+  if (!learnState.bestNums.length) { showToast('⚠️ Chưa học vòng nào'); return; }
+  renderNextSuggestion();
+  selectedNums = [...learnState.bestNums];
+  renderSelectedNums();
+  Array.from(document.getElementById('apGrid').children).forEach((el, i) => {
+    el.className = 'ball' + (selectedNums.includes(i + 1) ? ' selected' : '');
+  });
+  aiSuggestedNums = [...learnState.bestNums];
+  switchTab('autoplay');
+  showToast('✅ Đã áp dụng ' + learnState.bestNums.length + ' số vào Tự chơi');
+}
+
+function renderLearnUI() {
+  const s      = learnState;
+  const target = getLearnTarget();
+  const avg    = s.gen > 0 ? (s.sumHits / s.gen).toFixed(2) : '–';
+  const pct    = Math.min(100, Math.round(s.bestHits / target * 100));
+
+  document.getElementById('learnGen').textContent         = s.gen.toLocaleString();
+  document.getElementById('learnAvg').textContent         = avg;
+  document.getElementById('learnHits').textContent        = s.hits10.toLocaleString();
+  document.getElementById('learnTodayCount').textContent  = s.todayDraws.length;
+  document.getElementById('learnBestVal').textContent     = s.bestHits;
+  document.getElementById('learnBestText').textContent    = s.bestHits
+    ? `${s.bestHits}/${target} trùng`
+    : 'Chưa có kết quả';
+  document.getElementById('learnGenText').textContent     =
+    `Thế hệ ${s.gen.toLocaleString()} · T=${s.temperature.toFixed(3)}`;
+
+  // Thanh tiến trình
+  const pb = document.getElementById('learnProgressBar');
+  if (pb) {
+    const stopMode = document.getElementById('learnStopMode')?.value || 'target';
+    const maxGensMap = { gens_100k:100000, gens_500k:500000, gens_1m:1000000 };
+    if (stopMode === 'target') {
+      pb.style.width = pct + '%';
+      pb.style.background = pct >= 100 ? 'var(--green)' : 'var(--accent2)';
+      pb.title = `${s.bestHits}/${target} trùng`;
+    } else if (maxGensMap[stopMode]) {
+      const gPct = Math.min(100, Math.round(s.gen / maxGensMap[stopMode] * 100));
+      pb.style.width = gPct + '%';
+      pb.style.background = 'var(--accent2)';
+      pb.title = `${s.gen.toLocaleString()} / ${maxGensMap[stopMode].toLocaleString()} thế hệ`;
+    } else {
+      pb.style.width = '100%';
+      pb.style.background = 'var(--muted)';
+    }
+  }
+
+  const arc = document.getElementById('learnArc');
+  if (arc) {
+    const circ = 213.6;
+    arc.style.strokeDashoffset = circ - (circ * pct / 100);
+    arc.style.stroke = pct >= 100 ? 'var(--green)' : pct >= 70 ? 'var(--accent)' : 'var(--accent2)';
+  }
+
+  // Weight bars top 15
+  if (Object.keys(s.weights).length) {
+    const sorted = Object.entries(s.weights).sort((a,b)=>b[1]-a[1]).slice(0, 15);
+    const maxW   = sorted[0][1];
+    document.getElementById('weightBars').innerHTML = sorted.map(([n, w]) => {
+      const bar  = Math.round(w / maxW * 100);
+      const star = s.bestNums.includes(+n) ? ' <span class="gen-badge">★</span>' : '';
+      return `<div class="learn-stat-row">
+        <span style="width:26px;font-weight:700;color:var(--accent2)">${+n<10?'0'+n:n}</span>
+        <div class="weight-bar-wrap"><div class="weight-bar" style="width:${bar}%"></div></div>
+        <span style="width:44px;text-align:right;font-size:11px;color:var(--muted)">${(w*100).toFixed(1)}%${star}</span>
+      </div>`;
+    }).join('');
+  }
+
+  // Log — 15 dòng gần nhất
+  if (s.hitHistory.length) {
+    const recent = s.hitHistory.slice(-15).reverse();
+    document.getElementById('learnLog').innerHTML = recent.map((h, i) => {
+      const round = s.gen - i;
+      const kyIdx = (round - 1) % s.todayDraws.length;
+      const period = s.todayDraws[kyIdx]?.period || '?';
+      const cls  = h >= target ? 'ap-win fw-bold' : h >= target - 2 ? 'text-accent' : 'text-muted';
+      const icon = h >= target ? '🎯' : h >= target - 2 ? '✅' : '·';
+      return `<div class="ap-log-row">
+        <span class="text-muted" style="font-size:11px">Kỳ #${period}</span>
+        <span class="${cls}">${icon} Trùng ${h}/${getPickCount()}</span>
+      </div>`;
+    }).join('');
+  }
+}
+
+function drawLearnChart() {
+  const canvas = document.getElementById('learnChart');
+  if (!canvas) return;
+  const ctx  = canvas.getContext('2d');
+  const data = learnState.hitHistory;
+  if (data.length < 2) return;
+
+  const W = canvas.offsetWidth || 320;
+  const H = 120;
+  canvas.width = W; canvas.height = H;
+  ctx.clearRect(0, 0, W, H);
+
+  const pad = 24, maxVal = getPickCount();
+  const step = (W - pad * 2) / (data.length - 1);
+
+  // Grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.05)'; ctx.lineWidth = 1;
+  [0, Math.floor(maxVal/2), maxVal].forEach(v => {
+    const y = H - pad - (v / maxVal) * (H - pad * 2);
+    ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(W - pad, y); ctx.stroke();
+    ctx.fillStyle = 'rgba(100,116,139,0.7)'; ctx.font = '9px sans-serif';
+    ctx.fillText(v, 2, y + 3);
+  });
+
+  // Target line
+  const target = getLearnTarget();
+  const ty = H - pad - (target / maxVal) * (H - pad * 2);
+  ctx.strokeStyle = 'rgba(34,197,94,0.5)'; ctx.setLineDash([4,4]); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(pad, ty); ctx.lineTo(W - pad, ty); ctx.stroke();
+  ctx.setLineDash([]); ctx.fillStyle = 'rgba(34,197,94,0.7)'; ctx.font = '9px sans-serif';
+  ctx.fillText('Mục tiêu', W - pad - 40, ty - 3);
+
+  // Moving avg
+  const ws = Math.max(1, Math.floor(data.length / 15));
+  const ma = data.map((_, i) => {
+    const sl = data.slice(Math.max(0, i-ws), i+1);
+    return sl.reduce((a,b)=>a+b,0)/sl.length;
+  });
+  ctx.strokeStyle = 'rgba(59,130,246,0.5)'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ma.forEach((v, i) => {
+    const x = pad + i * step, y = H - pad - (v / maxVal) * (H - pad * 2);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Area
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, 'rgba(232,176,32,0.25)'); grad.addColorStop(1, 'rgba(232,176,32,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  data.forEach((v, i) => {
+    const x = pad + i * step, y = H - pad - (Math.min(v, maxVal) / maxVal) * (H - pad * 2);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.lineTo(pad + (data.length-1)*step, H-pad); ctx.lineTo(pad, H-pad);
+  ctx.closePath(); ctx.fill();
+
+  // Main line
+  ctx.strokeStyle = 'var(--accent)'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  data.forEach((v, i) => {
+    const x = pad + i * step, y = H - pad - (Math.min(v, maxVal) / maxVal) * (H - pad * 2);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Target hit dots
+  data.forEach((v, i) => {
+    if (v >= target) {
+      ctx.fillStyle = 'var(--green)';
+      ctx.beginPath(); ctx.arc(pad + i * step, H - pad - (v / maxVal) * (H - pad * 2), 3, 0, Math.PI*2); ctx.fill();
+    }
+  });
+}
+
+// =====================================================================
+// BACKGROUND SERVICE WORKER MANAGEMENT
+// =====================================================================
+
+const SW_CODE = `
+const SW_VERSION = 'keno-sw-v2';
+const MINHCHINH_URL = 'https://www.minhchinh.com/truc-tiep-xo-so-tu-chon-keno.html';
+
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', e => { e.waitUntil(self.clients.claim()); scheduleNext(); });
+self.addEventListener('message', e => {
+  if (e.data?.type === 'START_BG')  scheduleNext();
+  if (e.data?.type === 'STOP_BG')   stopBg();
+  if (e.data?.type === 'FORCE_RUN') runBgTask();
+  if (e.data?.type === 'PING')      e.source?.postMessage({type:'PONG'});
+});
+self.addEventListener('sync', e => { if (e.tag==='keno-bg') e.waitUntil(runBgTask()); });
+self.addEventListener('periodicsync', e => { if (e.tag==='keno-periodic') e.waitUntil(runBgTask()); });
+
+let bgTimer = null;
+function scheduleNext() {
+  if (bgTimer) clearTimeout(bgTimer);
+  bgTimer = setTimeout(() => runBgTask().then(scheduleNext), 10*60*1000);
+}
+function stopBg() { if (bgTimer) { clearTimeout(bgTimer); bgTimer=null; } }
+
+function isKenoHours() {
+  const now=new Date(), vnH=(now.getUTCHours()+7)%24, vnM=now.getUTCMinutes();
+  return vnH*60+vnM >= 360 && vnH*60+vnM < 1320;
+}
+
+async function swGet(k) {
+  try { const c=await caches.open(SW_VERSION); const r=await c.match('/__d/'+k); return r?await r.json():null; } catch { return null; }
+}
+async function swSet(k,v) {
+  try { const c=await caches.open(SW_VERSION); await c.put('/__d/'+k,new Response(JSON.stringify(v),{headers:{'Content-Type':'application/json'}})); } catch {}
+}
+
+function parseMC(html) {
+  const draws=[], text=html.replace(/[\r\n\t]+/g,' ').replace(/\s{2,}/g,' ');
+  const re=/#(\d{5,7})[^#]*(\d{2}\/\d{2}\/\d{4})\s*(\d{2}:\d{2})\s*((?:(?:[0-7]?\d|80)\s+){19}(?:[0-7]?\d|80))/g;
+  let m;
+  while((m=re.exec(text))!==null){
+    const nums=m[4].trim().split(/\s+/).map(Number).filter(n=>n>=1&&n<=80);
+    const u=[...new Set(nums)].slice(0,20);
+    if(u.length===20) draws.push({period:+m[1],date:m[2],time:m[3],numbers:u.sort((a,b)=>a-b)});
+  }
+  return draws.sort((a,b)=>b.period-a.period);
+}
+
+function sampleN(w,temp,cnt) {
+  const T=Math.max(temp,0.05),lo=[];
+  for(let n=1;n<=80;n++) lo.push({n,v:Math.exp(w[n]/T)});
+  const tot=lo.reduce((s,x)=>s+x.v,0); lo.forEach(x=>x.p=x.v/tot);
+  const ch=[];let at=0;
+  while(ch.length<cnt&&at<600){at++;const r=Math.random();let c=0;for(const x of lo){c+=x.p;if(r<=c&&!ch.includes(x.n)){ch.push(x.n);break;}}}
+  return ch.sort((a,b)=>a-b);
+}
+
+function doLearn(state,draws,n,target) {
+  let {weights:w,gen,sumHits,hits10,bestHits,bestNums,hitHistory,temperature:temp,learningRate:lr}=state;
+  for(let i=0;i<n;i++){
+    const idx=gen%draws.length, actual=draws[idx].numbers, pred=sampleN(w,temp,10);
+    const hits=pred.filter(n=>actual.includes(n)).length;
+    gen++;sumHits+=hits;hitHistory.push(hits);if(hitHistory.length>200)hitHistory.shift();
+    if(hits>=target)hits10++;
+    if(hits>bestHits||!bestNums.length){bestHits=hits;bestNums=[...pred];}
+    const rw=hits/target;
+    pred.forEach(n=>{if(actual.includes(n))w[n]=Math.min(1,w[n]+lr*(0.5+0.5*rw));else w[n]=Math.max(0.05,w[n]-lr*0.25*(1-rw*0.5));});
+    actual.forEach(n=>{if(!pred.includes(n))w[n]=Math.min(1,w[n]+lr*0.08);});
+    temp=Math.max(0.08,temp*0.9995);lr=Math.max(0.03,lr*0.9998);
+  }
+  return {...state,weights:w,gen,sumHits,hits10,bestHits,bestNums,hitHistory,temperature:temp,learningRate:lr};
+}
+
+async function runBgTask() {
+  const t0=Date.now();
+  let draws=await swGet('draws')||[];
+  if(isKenoHours()){
+    try{
+      const r=await fetch(MINHCHINH_URL,{headers:{'Accept':'text/html','Cache-Control':'no-cache'},mode:'cors'});
+      if(r.ok){const h=await r.text();const d=parseMC(h);if(d.length){draws=d;await swSet('draws',draws);}}
+    }catch{}
+  }
+  if(draws.length>=5){
+    let st=await swGet('learn');
+    if(!st||!Object.keys(st.weights||{}).length){
+      const w={};for(let n=1;n<=80;n++)w[n]=0.5;
+      draws.slice(0,50).forEach((d,i)=>{const wt=1-(i/50)*0.5;d.numbers.forEach(n=>{w[n]+=wt;});});
+      const mx=Math.max(...Object.values(w));const mn=Math.min(...Object.values(w));
+      for(let n=1;n<=80;n++)w[n]=mx>mn?0.25+0.75*(w[n]-mn)/(mx-mn):0.5;
+      st={weights:w,gen:0,sumHits:0,hits10:0,bestHits:0,bestNums:[],hitHistory:[],temperature:1.0,learningRate:0.18};
+    }
+    const today=draws[0]?.date||'';
+    const td=draws.filter(d=>d.date===today).reverse();
+    const train=td.length>=3?td:draws.slice(0,50).reverse();
+    st=doLearn(st,train,5000,10);
+    st.savedAt=new Date().toISOString();
+    await swSet('learn',st);
+  }
+  const status={lastRun:new Date().toISOString(),ms:Date.now()-t0,draws:draws.length,latest:draws[0]?.period||0,kenoHours:isKenoHours()};
+  await swSet('status',status);
+  const clients=await self.clients.matchAll({type:'window'});
+  clients.forEach(c=>c.postMessage({type:'BG_UPDATE',status}));
+}
+`;
+
+let swReg = null;
+
+async function initServiceWorker() {
+  if (!('serviceWorker' in navigator)) {
+    updateBgBar(false, 'Trình duyệt không hỗ trợ background');
+    return;
+  }
+  try {
+    const blob = new Blob([SW_CODE], {type:'application/javascript'});
+    const url  = URL.createObjectURL(blob);
+    swReg = await navigator.serviceWorker.register(url);
+    await navigator.serviceWorker.ready;
+
+    // Periodic sync
+    if ('periodicSync' in swReg) {
+      await swReg.periodicSync.register('keno-periodic', {minInterval: 10*60*1000}).catch(()=>{});
+    }
+
+    // Nhận message từ SW
+    navigator.serviceWorker.addEventListener('message', e => {
+      if (e.data?.type === 'BG_UPDATE') onBgUpdate(e.data.status);
+    });
+
+    // Bắt SW bắt đầu học
+    sendToSW({type:'START_BG'});
+    updateBgBar(true, 'Background đang chạy · tự cập nhật mỗi 10 phút');
+    showToast('✅ Background service đã khởi động');
+  } catch(e) {
+    updateBgBar(false, 'Background lỗi: ' + e.message);
+  }
+}
+
+function sendToSW(msg) {
+  if (navigator.serviceWorker?.controller) {
+    navigator.serviceWorker.controller.postMessage(msg);
+  } else if (swReg?.active) {
+    swReg.active.postMessage(msg);
+  }
+}
+
+function forceBgRun() {
+  sendToSW({type:'FORCE_RUN'});
+  updateBgBar(true, 'Đang chạy background task...');
+  showToast('🔄 Đang cập nhật dữ liệu & học ngầm...');
+}
+
+function onBgUpdate(status) {
+  const t = new Date(status.lastRun).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'});
+  updateBgBar(true,
+    `Cập nhật lúc ${t} · ${status.draws} kỳ · Kỳ mới nhất #${status.latest} · ${status.ms}ms`
+  );
+  // Nếu SW học được state mới → load vào learnState
+  loadBgLearnState();
+}
+
+async function loadBgLearnState() {
+  // Đọc từ SW cache qua fetch nội bộ
+  try {
+    const cache = await caches.open('keno-sw-v2');
+    const resp  = await cache.match('/__d/learn');
+    if (!resp) return;
+    const swState = await resp.json();
+    if (!swState?.weights || !Object.keys(swState.weights).length) return;
+
+    // Chỉ merge nếu SW học được nhiều hơn
+    if (swState.gen > (learnState.gen || 0)) {
+      learnState.weights      = swState.weights;
+      learnState.bestNums     = swState.bestNums     || [];
+      learnState.bestHits     = swState.bestHits     || 0;
+      learnState.gen          = swState.gen          || 0;
+      learnState.sumHits      = swState.sumHits      || 0;
+      learnState.hits10       = swState.hits10       || 0;
+      learnState.hitHistory   = swState.hitHistory   || [];
+      learnState.temperature  = swState.temperature  || 0.3;
+      learnState.learningRate = swState.learningRate || 0.05;
+      saveLearnState(); // đồng bộ vào localStorage
+      if (document.getElementById('tab-learn')?.classList.contains('active')) {
+        renderLearnUI();
+        renderSavedBadge(getSavedInfo());
+      }
+      console.log('[KenoAI] Đã đồng bộ', swState.gen, 'thế hệ từ background SW');
+    }
+  } catch {}
+}
+
+function updateBgBar(active, text) {
+  const bar = document.getElementById('bgStatusBar');
+  const dot = document.getElementById('bgDot');
+  const txt = document.getElementById('bgStatusText');
+  if (!bar) return;
+  bar.style.display = 'flex';
+  if (dot) { dot.className = 'bg-dot' + (active ? ' active' : ''); }
+  if (txt) txt.textContent = text;
+}
+
+// =====================================================================
+// HELPERS
+// =====================================================================
+function formatNum(n) {
+  return Math.abs(n).toLocaleString('vi-VN');
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-'+tab).classList.add('active');
+  const tabs = ['live','stats','predict','autoplay','history','learn'];
+  // Auto-load saved state khi mở tab học lần đầu
+  let learnTabOpened = false;
+  const idx = tabs.indexOf(tab);
+  if (idx >= 0) document.querySelectorAll('.nav-btn')[idx].classList.add('active');
+}
+
+function showToast(msg, duration=2500) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  setTimeout(() => t.style.display='none', duration);
+}
+</script>
+</body>
+</html>
