@@ -4,13 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>Keno AI - Phân tích & Tự chơi</title>
-<meta name="description" content="Phân tích Keno Vietlott với AI tự học">
-<meta name="theme-color" content="#0a0e1a">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="KenoAI">
-<link rel="manifest" href="manifest.json">
 <script>
 // ── Đăng ký Service Worker từ Blob (1 file duy nhất, không cần file riêng) ──
 if ('serviceWorker' in navigator) {
@@ -19,7 +12,7 @@ if ('serviceWorker' in navigator) {
   window.__registerSW = function(swCode) {
     const blob = new Blob([swCode], {type:'application/javascript'});
     const url  = URL.createObjectURL(blob);
-    navigator.serviceWorker.register(url, {scope: location.pathname.replace(/\/[^\/]*$/, '/') || '/'})
+    navigator.serviceWorker.register(url, {scope:'/'})
       .then(reg => {
         window.__swReg = reg;
         window.__swReady = true;
@@ -888,16 +881,47 @@ async function fetchFromMinhChinh(offHours = false) {
       if (banner) banner.innerHTML = `<span>⏸ Ngoài giờ (22:00–6:00)</span><span style="margin-left:auto;font-size:11px;color:var(--muted)">${draws.length} kỳ hôm nay</span>`;
       showToast(`📋 Ngoài giờ — đã tải ${draws.length} kỳ lịch sử`);
     } else {
-      if (banner) banner.innerHTML = `<span class="live-badge">LIVE</span><span>minhchinh.com · ${draws.length} kỳ · tự cập nhật mỗi 60s</span>`;
-      showToast(`✅ ${draws.length} kỳ thật từ minhchinh.com`);
+      // Kiểm tra có kỳ mới không
+      const prevLatest = drawData.length ? drawData[0]?.period : 0;
+      const newLatest  = draws[0]?.period || 0;
+      if (banner) banner.innerHTML = `<span class="live-badge">LIVE</span><span>minhchinh.com · Kỳ #${newLatest} · ${draws.length} kỳ · tự cập nhật 60s</span>`;
+      if (newLatest > prevLatest && prevLatest > 0) {
+        showToast(`🔴 Kỳ mới #${newLatest} vừa cập nhật!`, 3000);
+      } else {
+        showToast(`✅ ${draws.length} kỳ thật từ minhchinh.com`);
+      }
       setTimeout(fetchData, 60000);
     }
 
   } catch (e) {
-    // minhchinh.com không cho CORS → fallback demo im lặng
-    if (banner) banner.style.display = 'none';
-    useDemoData();
+    if (banner) {
+      banner.style.display = 'flex';
+      banner.innerHTML = `<span style="color:var(--red)">⚠️ Không tải được minhchinh.com</span>
+        <span style="font-size:11px;color:var(--muted);margin-left:6px">${e.message}</span>
+        <button class="btn btn-ghost" onclick="fetchData()" style="margin-left:auto;padding:2px 10px;font-size:11px">🔄 Thử lại</button>`;
+    }
+    showErrorScreen(e.message);
+    // Thử lại sau 30 giây
+    setTimeout(fetchData, 30000);
   }
+}
+
+function showErrorScreen(msg) {
+  // Chỉ hiện lỗi nếu chưa có dữ liệu nào
+  if (drawData.length > 0) return;
+  document.getElementById('latestDraw').innerHTML = `
+    <div style="text-align:center;padding:20px;color:var(--muted)">
+      <div style="font-size:32px;margin-bottom:8px">📡</div>
+      <div style="font-weight:700;color:var(--text);margin-bottom:6px">Chưa kết nối được dữ liệu</div>
+      <div style="font-size:12px;margin-bottom:12px">${msg}</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:12px">
+        App chỉ hiển thị dữ liệu thật từ minhchinh.com.<br>
+        Đang thử lại sau 30 giây...
+      </div>
+      <button class="btn btn-primary" onclick="fetchData()">🔄 Thử lại ngay</button>
+    </div>`;
+  document.getElementById('historyList').innerHTML =
+    '<div class="text-sm text-muted" style="padding:10px">Chưa có dữ liệu — cần kết nối minhchinh.com</div>';
 }
 
 function parseMinhChinhHTML(html) {
@@ -959,69 +983,7 @@ function parseMinhChinhHTML(html) {
   return draws.sort((a,b) => b.period - a.period);
 }
 
-// Tính kỳ hiện tại dựa theo giờ thực (Keno bắt đầu 6:00, mỗi 10 phút)
-function calcCurrentPeriod() {
-  const now = new Date();
-  const vnH = (now.getUTCHours() + 7) % 24;
-  const vnM = now.getUTCMinutes();
-  // Kỳ đầu ngày bắt đầu lúc 6:00
-  const minSince6 = Math.max(0, vnH * 60 + vnM - 6 * 60);
-  const kyToday = Math.floor(minSince6 / 10) + 1; // số kỳ đã chạy hôm nay
-  // Ngày gốc tham chiếu: 24/08/2026 = kỳ ~293000 (ước tính)
-  const BASE_DATE = new Date(Date.UTC(2026, 7, 24, 0, 0, 0)); // 24/08/2026 UTC
-  const BASE_PERIOD = 293118; // kỳ đầu ngày 24/08/2026
-  const daysDiff = Math.floor((now - BASE_DATE) / (1000 * 60 * 60 * 24));
-  // Mỗi ngày có tối đa 97 kỳ (6:00–21:50)
-  const PERIODS_PER_DAY = 97;
-  return BASE_PERIOD + daysDiff * PERIODS_PER_DAY + (kyToday - 1);
-}
 
-function genDraw(periodNum, timeOffset) {
-  const nums = [];
-  // Dùng seed từ period để kết quả nhất quán (cùng period = cùng số)
-  let seed = periodNum * 1000003 + timeOffset;
-  function rand() {
-    seed = (seed * 1664525 + 1013904223) & 0xffffffff;
-    return Math.abs(seed) / 0xffffffff;
-  }
-  while (nums.length < 20) {
-    const n = Math.floor(rand() * 80) + 1;
-    if (!nums.includes(n)) nums.push(n);
-  }
-  return nums.sort((a,b) => a-b);
-}
-
-function useDemoData() {
-  drawData = [];
-  const currentPeriod = calcCurrentPeriod();
-
-  for (let i = 0; i < 100; i++) {
-    const period = currentPeriod - i;
-    if (period < 1) break;
-    const d = new Date();
-    d.setMinutes(d.getMinutes() - i * 10);
-    // Tính giờ VN
-    const vnMs = d.getTime() + 7 * 3600 * 1000;
-    const vnD = new Date(vnMs);
-    const dateStr = vnD.toLocaleDateString('vi-VN', {timeZone:'UTC'});
-    const timeStr = vnD.toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit', timeZone:'UTC'});
-
-    drawData.push({
-      period,
-      date: dateStr,
-      time: timeStr,
-      numbers: genDraw(period, i)
-    });
-  }
-
-  computeFreq();
-  renderLatestDraw();
-  renderHistory();
-  renderStats();
-  renderStatPrediction();
-  startCountdown();
-  showToast(`📊 Mô phỏng · Kỳ hiện tại #${currentPeriod}`);
-}
 
 // =====================================================================
 // COMPUTE FREQUENCY
@@ -1458,12 +1420,14 @@ function startCountdown() {
     document.getElementById('countdown').textContent = `${m}:${s<10?'0'+s:s}`;
     document.getElementById('progressBar').style.width = ((INTERVAL - rem) / INTERVAL * 100) + '%';
 
-    // Khi đếm ngược về 0 (rem = INTERVAL tức là vừa sang kỳ mới)
-    if (rem === INTERVAL || rem === INTERVAL - 1) {
-      const newPeriod = calcCurrentPeriod();
-      if (newPeriod !== lastPeriod && drawData.length) {
-        lastPeriod = newPeriod;
-        addNewDemoDraw(newPeriod);
+    // Khi đếm ngược về 0 → fetch kỳ mới từ minhchinh.com
+    if ((rem === INTERVAL || rem === INTERVAL - 1) && drawData.length) {
+      const latestPeriod = drawData[0]?.period || 0;
+      if (latestPeriod !== lastPeriod) {
+        lastPeriod = latestPeriod;
+      } else {
+        // Có thể có kỳ mới — fetch lại
+        fetchData();
       }
     }
   }
@@ -1471,25 +1435,7 @@ function startCountdown() {
   countdownTimer = setInterval(tick, 1000);
 }
 
-function addNewDemoDraw(period) {
-  const now = new Date();
-  const vnMs = now.getTime() + 7 * 3600 * 1000;
-  const vnD = new Date(vnMs);
-  const nums = genDraw(period, 0);
-  const newDraw = {
-    period,
-    date: vnD.toLocaleDateString('vi-VN', {timeZone:'UTC'}),
-    time: vnD.toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit', timeZone:'UTC'}),
-    numbers: nums
-  };
-  // Thêm vào đầu drawData
-  drawData.unshift(newDraw);
-  if (drawData.length > 200) drawData.pop(); // giữ tối đa 200 kỳ
-  computeFreq();
-  renderLatestDraw();
-  renderLiveHistory();
-  showToast(`🔴 Kỳ mới #${period} vừa xổ!`, 3000);
-}
+
 
 // =====================================================================
 // AUTO PLAY
